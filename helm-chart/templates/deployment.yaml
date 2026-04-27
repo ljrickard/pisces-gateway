@@ -30,3 +30,5 @@ spec:
               value: {{ .Values.env.REDIS_ADDR | quote }}
             - name: LOGGING_LEVEL
               value: {{ .Values.env.LOGGING_LEVEL | quote }}
+            - name: FRASIER_BOT_URL
+              value: {{ .Values.env.FRASIER_BOT_URL | quote }}

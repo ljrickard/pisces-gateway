@@ -14,10 +14,10 @@ HELM_REGISTRY="oci://$REGION-docker.pkg.dev/$PROJECT_ID/$REPO"
 echo "🐟 Starting Gateway Deployment (Version: $CHART_VERSION)..."
 
 # 1. Build & Push Docker Image
-echo "📦 Building Docker image..."
 gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
 # Notice we don't need --platform linux/amd64 here because we forced it in the Go compiler!
-docker build -t $IMAGE_PATH .
+echo "📦 Building Gateway Docker image..."
+docker build --build-arg SERVICE_NAME=server -t $IMAGE_PATH .
 docker push $IMAGE_PATH
 
 # 2. Deploy to GKE
