@@ -1,0 +1,28 @@
+# gateway-infra.yaml (Keep this OUTSIDE the helm-chart folder)
+# kubectl apply -f gateway-infra.yaml (run once)
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: Gateway
+metadata:
+  name: pisces-external-gateway
+  namespace: default
+  annotations:
+    networking.gke.io/addresses: "pisces-gateway-ip" 
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: pisces-security-policy
+  namespace: default
+spec:
+  default:
+    securityPolicy: pisces-gateway-allowlist # Your Cloud Armor policy
+  targetRef:
+    group: ""
+    kind: Service
+    name: pisces-gateway-svc

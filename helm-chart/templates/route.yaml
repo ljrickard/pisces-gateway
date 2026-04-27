@@ -1,0 +1,18 @@
+# helm-chart/templates/route.yaml
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Name }}-route
+  namespace: default
+spec:
+  parentRefs:
+  # Notice this points to the Gateway we created manually in Step A!
+  - name: pisces-external-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: {{ .Release.Name }}-svc
+      port: 80

@@ -1,0 +1,6 @@
+image:
+  repository: us-central1-docker.pkg.dev/pisces-12/pisces-repo/pisces-gateway
+  pullPolicy: Always
+
+# The KSA we created in Terraform for the Gateway!
+serviceAccountName: pisces-gateway-ksa
