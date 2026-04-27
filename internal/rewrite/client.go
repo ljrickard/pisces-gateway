@@ -2,24 +2,38 @@ package rewrite
 
 import (
 	"context"
-	"log/slog"
+	"fmt"
+	"strings"
+
+	"pisces-gateway/internal/gemini"
 )
 
-type Client struct{}
+// The Struct is now clean and injected with your custom client
+type GeminiRewriter struct {
+	LLM *gemini.Client
+}
 
-func NewClient() *Client { return &Client{} }
-
-func (c *Client) Resolve(ctx context.Context, query string, history []string) string {
+func (r *GeminiRewriter) Resolve(ctx context.Context, query string, history []string) string {
 	if len(history) == 0 {
 		return query
 	}
 
-	slog.Debug("🧠 Rewriter Analyzing Context",
-		"query", query,
-		"history_depth", len(history),
-	)
+	prompt := fmt.Sprintf(`
+		You are a query reformulation assistant. 
+		Given the following conversation history and a new user query, rewrite the query to be a standalone question that resolves all pronouns.
+		
+		History:
+		%s
+		
+		New Query: %s
+		
+		Rewritten Query:`, strings.Join(history, "\n"), query)
 
-	// For now, this is your placeholder logic.
-	// Once we add Gemini, we will log the actual LLM latency here too.
-	return query
+	// We use the wrapper method, keeping the genai types hidden!
+	rewritten, err := r.LLM.GenerateText(ctx, prompt)
+	if err != nil || rewritten == "" {
+		return query // Graceful fallback
+	}
+
+	return strings.TrimSpace(rewritten)
 }

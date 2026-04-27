@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
+	"pisces-gateway/internal/intent"
 	"pisces-gateway/internal/proxy"
+	"pisces-gateway/internal/rewrite"
 	"time"
 )
 
@@ -30,8 +32,8 @@ type Intent interface {
 
 type Pipeline struct {
 	Normalizer Normalizer
-	Rewriter   Rewriter
-	Intent     Intent
+	Rewriter   *rewrite.GeminiRewriter
+	Intent     *intent.Classifier
 	Cache      *cache.RedisClient
 	FrasierBot *proxy.FrasierClient
 }

@@ -3,7 +3,7 @@
 # ==========================================
 # Change this line:
 FROM golang:alpine AS builder
-
+RUN apk --no-cache add ca-certificates
 WORKDIR /app
 
 # Copy the module files and download dependencies
@@ -22,6 +22,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /pisces-g
 # ==========================================
 # 'scratch' is an empty Docker image. No OS, no shell, no utilities.
 FROM scratch
+
+# Copy the SSL certificates from the builder so Go can make HTTPS requests
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Copy ONLY the compiled binary from the builder stage
 COPY --from=builder /pisces-gateway /pisces-gateway

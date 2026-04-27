@@ -32,3 +32,9 @@ spec:
               value: {{ .Values.env.LOGGING_LEVEL | quote }}
             - name: FRASIER_BOT_URL
               value: {{ .Values.env.FRASIER_BOT_URL | quote }}
+            - name: GEMINI_PROJECT
+              value: {{ .Values.gemini.project | quote }}
+            - name: GEMINI_LOCATION
+              value: {{ .Values.gemini.location | quote }}
+            - name: GEMINI_MODEL
+              value: {{ .Values.gemini.model | quote }}            

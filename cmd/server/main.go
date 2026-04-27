@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,8 +11,11 @@ import (
 
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
+	"pisces-gateway/internal/gemini"
+	"pisces-gateway/internal/intent"
 	"pisces-gateway/internal/pipeline"
 	"pisces-gateway/internal/proxy"
+	"pisces-gateway/internal/rewrite"
 )
 
 // ChatRequest represents the incoming JSON body from the user
@@ -44,7 +48,30 @@ func main() {
 
 	slog.Info("🐟 Starting Pisces API Gateway...")
 
-	// 2. Load Environment Variables
+	geminiCfg := gemini.Config{
+		ProjectID: os.Getenv("GEMINI_PROJECT"),
+		Location:  os.Getenv("GEMINI_LOCATION"),
+		Model:     os.Getenv("GEMINI_MODEL"),
+		Retry: gemini.RetryConfig{
+			MaxRetries: 3,
+			BaseDelay:  2 * time.Second,
+		},
+	}
+
+	if geminiCfg.Model == "" {
+		slog.Error("❌ GEMINI_MODEL environment variable is not set")
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	geminiClient, err := gemini.NewClient(ctx, geminiCfg)
+	if err != nil {
+		slog.Error("❌ Critical failure: Gemini unreachable", "error", err)
+		os.Exit(1)
+	}
+
+	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID, "model", geminiCfg.Model)
+
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		slog.Error("REDIS_ADDR environment variable is required")
@@ -57,7 +84,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Fail-Fast Downstream Health Check
 	slog.Info("🔌 Connecting to Redis...", "addr", redisAddr)
 	redisCache, err := cache.NewRedisClient(redisAddr)
 	if err != nil {
@@ -74,13 +100,13 @@ func main() {
 	}
 	slog.Info("✅ Downstream Frasier Bot is ALIVE.")
 
-	// Inject dependencies into the Gateway Pipeline
 	p := &pipeline.Pipeline{
+		Rewriter:   &rewrite.GeminiRewriter{LLM: geminiClient},
+		Intent:     &intent.Classifier{LLM: geminiClient},
 		Cache:      redisCache,
 		FrasierBot: frasierClient,
 	}
 
-	// 5. Setup HTTP Router
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -92,13 +118,11 @@ func main() {
 		w.Write([]byte("Pisces Gateway is Healthy"))
 	})
 
-	// Gateway's own health check (for K8s readiness probes)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Gateway OK"))
 	})
 
-	// The Main Chat Endpoint
 	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("Handling Request")
 		if r.Method != http.MethodPost {
@@ -106,14 +130,12 @@ func main() {
 			return
 		}
 
-		// Parse Headers for infrastructure flags & Session ID
 		metadata, valid := config.ParseRequestMetadata(r)
 		if !valid {
 			http.Error(w, "Missing or invalid X-Pisces-Session-ID header", http.StatusBadRequest)
 			return
 		}
 
-		// Decode the User's Message
 		var req ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			slog.Warn("Malformed request body", "error", err)
@@ -121,17 +143,14 @@ func main() {
 			return
 		}
 
-		// Execute the Gateway Pipeline (Cache Check -> Bot Request -> Save Cache)
 		answer := p.Execute(r.Context(), req.Message, metadata.SessionID, metadata.Flags)
 
-		// Return the final answer to the user
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"response": answer,
 		})
 	})
 
-	// 6. Start the Server
 	slog.Info("🚀 Pisces Gateway listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		slog.Error("❌ Gateway server crashed", "error", err)
