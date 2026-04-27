@@ -1,12 +1,14 @@
 package normalize
 
-import "log"
+import (
+	"context"
+	"strings"
+)
 
 type Service struct{}
 
 func NewService() *Service { return &Service{} }
 
-func (s *Service) Process(query string) string {
-	log.Println("🧹 Normalizing query...")
-	return query
+func (s *Service) Process(ctx context.Context, query string) string {
+	return strings.TrimSpace(strings.ToLower(query))
 }

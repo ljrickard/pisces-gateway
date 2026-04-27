@@ -1,0 +1,55 @@
+# macOS system files
+.DS_Store
+
+# Development / IDE folders
+.vscode/
+.idea/
+.git
+*.swp
+
+# Local Go artifacts
+bin/
+out/
+dist/
+
+# Docker / Infrastructure
+docker-compose.yml
+Dockerfile
+infra/terraform.tfstate*
+infra/.terraform/
+
+# Scripts & Testing
+scripts/*.html
+scripts/loadtest.js
+.dockerignore
+
+# Build logs
+*.log
+*.tgz# macOS system files
+.DS_Store
+
+# Development / IDE folders
+.vscode/
+.idea/
+.git
+*.swp
+
+# Local Go artifacts
+bin/
+out/
+dist/
+
+# Docker / Infrastructure
+docker-compose.yml
+Dockerfile
+infra/terraform.tfstate*
+infra/.terraform/
+
+# Scripts & Testing
+scripts/*.html
+scripts/loadtest.js
+.dockerignore
+
+# Build logs
+*.log
+*.tgz

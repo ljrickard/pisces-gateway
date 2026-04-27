@@ -2,8 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"pisces-gateway/internal/cache"
@@ -16,47 +17,46 @@ import (
 )
 
 type ChatRequest struct {
-	Message string `json:"message"`
+	Message   string `json:"message"`
+	SessionID string `json:"session_id"`
 }
 
 func main() {
-	log.Println("🐟 Starting Pisces API Gateway...")
-
-	// 1. Initialize Concrete Dependencies
-	redis := cache.NewRedisClient()
-	norm := normalize.NewService()
-	rewriter := rewrite.NewClient()
-	classifier := intent.NewClassifier()
-	prox := proxy.NewClient()
-
-	// 2. Wire the Pipeline
-	orchestrator := &pipeline.Pipeline{
-		Normalizer: norm,
-		Rewriter:   rewriter,
-		Cache:      redis,
-		Intent:     classifier,
-		Proxy:      prox,
+	level := slog.LevelInfo
+	switch os.Getenv("LOGGING_LEVEL") {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
 	}
 
-	// 3. HTTP Routes
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	}))
+	slog.SetDefault(logger)
+
+	slog.Info("🐟 Starting Pisces API Gateway", "level", level.String())
+
+	slog.Info("🐟 Starting Pisces API Gateway")
+
+	redisClient, err := cache.NewRedisClient(getEnv("REDIS_ADDR", "localhost:6379"))
+	if err != nil {
+		slog.Error("Redis failed to initialize", "error", err)
+		os.Exit(1)
+	}
+
+	// Wire dependencies with Context-aware constructors if needed
+	p := &pipeline.Pipeline{
+		Normalizer: normalize.NewService(),
+		Rewriter:   rewrite.NewClient(),
+		Cache:      redisClient,
+		Intent:     intent.NewClassifier(),
+		Proxy:      proxy.NewClient(),
+	}
+
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
-
-	// 2. The GCP Load Balancer External Health Check (Catches "/")
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Only return 200 for the exact root path
-		if r.URL.Path == "/" {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("GCP LB OK"))
-			return
-		}
-		// Return 404 for any other random paths
-		http.NotFound(w, r)
-	})
 
 	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -64,30 +64,52 @@ func main() {
 			return
 		}
 
-		var req ChatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Bad request", http.StatusBadRequest)
+		meta, ok := config.ParseRequestMetadata(r)
+		if !ok {
+			slog.Warn("Rejected request: Missing or invalid X-Pisces-Session-ID")
+			http.Error(w, "Invalid X-Pisces-Session-ID header. Must be a valid ULID.", http.StatusBadRequest)
 			return
 		}
 
-		// Parse Feature Flags from Headers
-		flags := config.ParseFlags(r)
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
 
-		// Execute
-		response := orchestrator.Execute(req.Message, flags)
+		ctx := r.Context()
+		response := p.Execute(ctx, req.Message, meta.SessionID, meta.Flags)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"response": response})
 	})
 
-	// 4. Start Server
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
+	mux.HandleFunc("/", handleRoot)
+
 	srv := &http.Server{
 		Addr:         ":8080",
 		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
 	}
 
-	log.Println("🚀 Gateway listening on :8080")
-	log.Fatal(srv.ListenAndServe())
+	if err := srv.ListenAndServe(); err != nil {
+		slog.Error("Server crashed", "error", err)
+	}
+}
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
+
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Write([]byte("Pisces Gateway Online"))
 }

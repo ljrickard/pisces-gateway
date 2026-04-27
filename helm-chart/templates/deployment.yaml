@@ -25,3 +25,8 @@ spec:
               port: 8080
             initialDelaySeconds: 2
             periodSeconds: 5
+          env:
+            - name: REDIS_ADDR
+              value: {{ .Values.env.REDIS_ADDR | quote }}
+            - name: LOGGING_LEVEL
+              value: {{ .Values.env.LOGGING_LEVEL | quote }}

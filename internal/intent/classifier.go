@@ -1,12 +1,11 @@
 package intent
 
-import "log"
+import "context"
 
 type Classifier struct{}
 
 func NewClassifier() *Classifier { return &Classifier{} }
 
-func (c *Classifier) Determine(query string) string {
-	log.Println("🧭 Classifying intent...")
-	return "http://frasier-rag-svc.default.svc.cluster.local:80" // Mock routing decision
+func (c *Classifier) Determine(ctx context.Context, query string) string {
+	return "http://frasier-bot-svc" // Placeholder
 }
