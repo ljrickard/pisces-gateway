@@ -16,7 +16,7 @@ type FrasierClient struct {
 }
 
 func NewFrasierClient(url string) (*FrasierClient, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	// Perform the health check before returning
 	resp, err := client.Get(fmt.Sprintf("%s/health", url))

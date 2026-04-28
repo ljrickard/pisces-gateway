@@ -31,18 +31,19 @@ type Intent interface {
 }
 
 type Pipeline struct {
-	Normalizer Normalizer
-	Rewriter   *rewrite.GeminiRewriter
-	Intent     *intent.Classifier
-	Cache      *cache.RedisClient
-	FrasierBot *proxy.FrasierClient
+	Normalizer   Normalizer
+	Rewriter     *rewrite.GeminiRewriter
+	Intent       *intent.Classifier
+	Querycache   *cache.QueryCache
+	Sessionstore *cache.SessionStore
+	FrasierBot   *proxy.FrasierClient
 }
 
 func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID string, flags config.FeatureState) string {
 	// 1. Fetch History & Rewrite the Query
 	rewritten := rawQuery
 	if p.Rewriter != nil {
-		history, err := p.Cache.GetSession(ctx, sessionID, flags.ContextHistoryLimit)
+		history, err := p.Sessionstore.GetSession(ctx, sessionID, flags.ContextHistoryLimit)
 		if err != nil {
 			slog.Error("❌ GetSession returned an error", "error", err)
 			return "I encountered an issue retrieving your session. Please try again."
@@ -52,7 +53,7 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 
 	// 2. Check the Gateway Cache
 	if !flags.BypassCache {
-		if cached, hit := p.Cache.GetCache(ctx, rewritten); hit {
+		if cached, hit := p.Querycache.GetCache(ctx, rewritten); hit {
 			slog.Info("🎯 Gateway Cache Hit", "query", rewritten)
 			return cached
 		}
@@ -96,10 +97,10 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 	go func() {
 		bgCtx := context.Background()
 		if !flags.BypassCache {
-			p.Cache.SetCache(bgCtx, rewritten, answer, 1*time.Hour)
+			p.Querycache.SetCache(bgCtx, rewritten, answer, 1*time.Hour)
 		}
-		p.Cache.SaveSession(bgCtx, sessionID, "User: "+rawQuery)
-		p.Cache.SaveSession(bgCtx, sessionID, "Bot: "+answer)
+		p.Sessionstore.SaveSession(bgCtx, sessionID, "User: "+rawQuery)
+		p.Sessionstore.SaveSession(bgCtx, sessionID, "Bot: "+answer)
 	}()
 
 	return answer

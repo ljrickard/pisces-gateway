@@ -4,89 +4,68 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	PrefixCache   = "cache:v1:"
-	PrefixSession = "session:v1:"
-	SessionTTL    = 7 * 24 * time.Hour // 7 Days
+	SessionTTL = 7 * 24 * time.Hour
 )
 
-type RedisClient struct {
-	client *redis.Client
+// RetryConfig matches our Gemini pattern, adding a hard Timeout
+type RetryConfig struct {
+	Timeout    time.Duration // Per-attempt timeout so a hung Redis doesn't freeze the Gateway
+	MaxRetries int
+	BaseDelay  time.Duration
 }
 
-func NewRedisClient(addr string) (*RedisClient, error) {
+// NewRedisConnection establishes the raw socket using the provided context
+func NewRedisConnection(ctx context.Context, addr string) (*redis.Client, error) {
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
+	// Use the injected context for the Ping! No more hardcoded 5 seconds.
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		return nil, fmt.Errorf("redis ping failed: %w", err)
 	}
 
 	slog.Info("✅ Redis connection established", "addr", addr)
-	return &RedisClient{client: rdb}, nil
+	return rdb, nil
 }
 
-func (r *RedisClient) GetCache(ctx context.Context, key string) (string, bool) {
-	fullKey := PrefixCache + key
-	val, err := r.client.Get(ctx, fullKey).Result()
+// executeWithRetry handles exponential backoff and safely ignores redis.Nil
+func executeWithRetry(ctx context.Context, cfg RetryConfig, operation func(context.Context) error) error {
+	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		// Apply the strict per-operation timeout
+		opCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+		err := operation(opCtx)
+		cancel()
 
-	if err == redis.Nil {
-		slog.Debug("💾 Cache Miss", "key", fullKey)
-		return "", false
-	} else if err != nil {
-		slog.Error("❌ Redis GetCache Error", "key", fullKey, "error", err)
-		return "", false
+		if err == nil {
+			return nil
+		}
+
+		// CRITICAL: A Cache Miss is not a failure. Do not retry!
+		if err == redis.Nil {
+			return err
+		}
+
+		if attempt == cfg.MaxRetries {
+			return err
+		}
+
+		delay := cfg.BaseDelay * (1 << uint(attempt))
+		jitter := time.Duration(rand.Int63n(int64(delay) / 4))
+		wait := delay + jitter
+
+		slog.Warn("⚠️ Redis transient error, retrying...", "error", err, "attempt", attempt+1)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
 	}
-
-	slog.Info("🎯 Cache Hit", "key", fullKey)
-	return val, true
-}
-
-func (r *RedisClient) SetCache(ctx context.Context, key string, value string, ttl time.Duration) error {
-	fullKey := PrefixCache + key
-	err := r.client.Set(ctx, fullKey, value, ttl).Err()
-	if err != nil {
-		slog.Error("❌ Redis SetCache Error", "key", fullKey, "error", err)
-		return err
-	}
-	slog.Debug("💾 Cache Stored", "key", fullKey, "ttl", ttl)
-	return nil
-}
-
-func (r *RedisClient) GetSession(ctx context.Context, sessionID string, limit int) ([]string, error) {
-	fullKey := PrefixSession + sessionID
-	slog.Debug("📜 Fetching Session History", "session_id", sessionID, "limit", limit)
-
-	// We still use the limit to only pull what the Pipeline requested
-	res, err := r.client.LRange(ctx, fullKey, 0, int64(limit-1)).Result()
-	if err != nil {
-		slog.Error("❌ Redis GetSession Error", "session_id", sessionID, "error", err)
-		return nil, err
-	}
-
-	return res, nil
-}
-
-func (r *RedisClient) SaveSession(ctx context.Context, sessionID string, message string) error {
-	fullKey := PrefixSession + sessionID
-
-	// Pipeline RPush and Expire together
-	pipe := r.client.Pipeline()
-	pipe.RPush(ctx, fullKey, message)
-	pipe.Expire(ctx, fullKey, SessionTTL) // Refresh the 7-day window
-
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		slog.Error("❌ Redis SaveSession Error", "session_id", sessionID, "error", err)
-	} else {
-		slog.Debug("📝 Saved to Session", "session_id", sessionID)
-	}
-	return err
+	return fmt.Errorf("max retries exceeded")
 }

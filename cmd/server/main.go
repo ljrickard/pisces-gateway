@@ -84,13 +84,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("🔌 Connecting to Redis...", "addr", redisAddr)
-	redisCache, err := cache.NewRedisClient(redisAddr)
+	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 1. Establish the shared base connection
+	rawRedis, err := cache.NewRedisConnection(startupCtx, os.Getenv("REDIS_ADDR"))
 	if err != nil {
 		slog.Error("❌ Failed to connect to Redis", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("✅ Redis connected.")
+
+	// 2. Query Cache: Fail-Fast (50ms timeout, 0 retries)
+	queryCache := cache.NewQueryCache(rawRedis, cache.RetryConfig{
+		Timeout:    50 * time.Millisecond,
+		MaxRetries: 0,
+	})
+
+	// 3. Session Store: Resilient (100ms timeout, 2 retries)
+	sessionStore := cache.NewSessionStore(rawRedis, cache.RetryConfig{
+		Timeout:    100 * time.Millisecond,
+		MaxRetries: 2,
+		BaseDelay:  50 * time.Millisecond,
+	})
 
 	slog.Info("🔗 Connecting to downstream Frasier Bot...", "url", frasierURL)
 	frasierClient, err := proxy.NewFrasierClient(frasierURL)
@@ -101,10 +116,11 @@ func main() {
 	slog.Info("✅ Downstream Frasier Bot is ALIVE.")
 
 	p := &pipeline.Pipeline{
-		Rewriter:   &rewrite.GeminiRewriter{LLM: geminiClient},
-		Intent:     &intent.Classifier{LLM: geminiClient},
-		Cache:      redisCache,
-		FrasierBot: frasierClient,
+		Rewriter:     &rewrite.GeminiRewriter{LLM: geminiClient},
+		Intent:       &intent.Classifier{LLM: geminiClient},
+		Sessionstore: sessionStore,
+		Querycache:   queryCache,
+		FrasierBot:   frasierClient,
 	}
 
 	mux := http.NewServeMux()
