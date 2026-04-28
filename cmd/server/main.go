@@ -149,7 +149,6 @@ func main() {
 	})
 
 	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("Handling Request")
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -174,6 +173,25 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{
 			"response": answer,
 		})
+	})
+
+	// DELETE /cache - Admin endpoint to wipe the Redis database for evaluation runs
+	mux.HandleFunc("/cache", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Call the FlushCache method we added to QueryCache earlier
+		if err := queryCache.FlushCache(r.Context()); err != nil {
+			slog.Error("❌ Failed to flush Redis cache via API", "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "success", "message": "Redis cache completely wiped"}`))
 	})
 
 	slog.Info("🚀 Pisces Gateway listening on :8080")

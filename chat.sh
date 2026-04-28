@@ -2,10 +2,20 @@
 
 # Configuration
 ENDPOINT="http://34.160.141.167/chat"
+CACHE_ENDPOINT="http://34.160.141.167/cache"
+
+# Check for wipe flag
+if [[ "$1" == "--wipe" ]]; then
+    echo "🧹 Wiping Semantic Cache and Session History..."
+    curl -i -X DELETE "$CACHE_ENDPOINT"
+    echo -e "\n--------------------------------------------"
+    shift # Remove --wipe from the arguments
+fi
+
 MESSAGE=${1:-"Why did Maris leave Niles?"}
 SESSION_ID=$2
 
-# Generate a ULID if one isn't provided as the second argument
+# Generate a ULID if one isn't provided
 if [ -z "$SESSION_ID" ]; then
     if command -v ulid &> /dev/null; then
         SESSION_ID=$(ulid)
@@ -18,7 +28,7 @@ echo "🚀 Sending request with SessionID: $SESSION_ID"
 echo "💬 Message: $MESSAGE"
 echo "--------------------------------------------"
 
-# Construct the JSON payload with the nested, domain-specific config
+# Construct the JSON payload
 JSON_PAYLOAD=$(cat <<EOF
 {
   "message": "$MESSAGE",
@@ -34,10 +44,10 @@ JSON_PAYLOAD=$(cat <<EOF
 EOF
 )
 
-# Fire the request testing both Gateway Headers and Bot Payload
+# Execute the chat request
 curl -i -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
   -H "X-Pisces-Session-ID: $SESSION_ID" \
-  -H "X-Pisces-Flag-SkipCache: true" \
-  -H "X-Pisces-Similarity-Threshold: 0.95" \
+  -H "X-Pisces-Flag-SkipCache: false" \
+  -H "X-Pisces-Similarity-Threshold: 0.60" \
   -d "$JSON_PAYLOAD"

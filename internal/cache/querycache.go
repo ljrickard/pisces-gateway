@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ const (
 type QueryCache struct {
 	client *redis.Client
 	cfg    RetryConfig
+	mu     sync.RWMutex // Add this to manage the index lifecycle
 }
 
 func NewQueryCache(client *redis.Client, cfg RetryConfig) *QueryCache {
@@ -26,9 +28,9 @@ func NewQueryCache(client *redis.Client, cfg RetryConfig) *QueryCache {
 }
 
 // InitializeIndex creates the RediSearch schema if it doesn't exist
-func (c *QueryCache) InitializeIndex(ctx context.Context) error {
+func (q *QueryCache) InitializeIndex(ctx context.Context) error {
 	// 768 is the exact dimension size for Google's text-embedding-004 model
-	err := c.client.Do(ctx,
+	err := q.client.Do(ctx,
 		"FT.CREATE", "idx:cache",
 		"ON", "HASH", "PREFIX", "1", PrefixCache,
 		"SCHEMA",
@@ -47,14 +49,18 @@ func (c *QueryCache) InitializeIndex(ctx context.Context) error {
 	slog.Info("🔍 Redis Vector Index initialized (or already exists)")
 	return nil
 }
-
-// GetCache performs a Vector KNN search in Redis
 func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, threshold float64) (string, bool) {
-	vectorBytes := float32ToByte(queryVector)
+	// Suspect #2: Dimension Mismatch. RediSearch silently drops vectors that don't match the schema DIM.
+	if len(queryVector) != 768 {
+		slog.Error("❌ [Cache] Vector dimension mismatch! RediSearch will ignore this.", "expected", 768, "got", len(queryVector))
+		return "", false
+	}
 
-	// FT.SEARCH query: Find the 1 nearest neighbor using the vector
+	vectorBytes := float32ToByte(queryVector)
 	searchQuery := "*=>[KNN 1 @embedding $vec AS distance]"
 
+	// 🚨 Fix 1: Explicitly define results as a slice of interfaces
+	// 1. Use .Result() so go-redis just gives us whatever raw interface it receives
 	var res interface{}
 	err := executeWithRetry(ctx, q.cfg, func(opCtx context.Context) error {
 		var innerErr error
@@ -68,51 +74,98 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, thresh
 	})
 
 	if err != nil {
-		slog.Error("❌ Redis Vector Search Error (Degraded)", "error", err)
+		slog.Error("❌ Redis Vector Search Error", "error", err)
 		return "", false
 	}
 
-	// Parse the raw RediSearch response
-	results, ok := res.([]interface{})
-	if !ok || len(results) == 0 || results[0].(int64) == 0 {
-		slog.Debug("💾 Semantic Cache Miss (No entries found)")
-		return "", false
-	}
-
-	// Extract the fields from the response array
-	fields := results[2].([]interface{})
 	var answer string
 	var distance float64
+	var totalResults int64
 
-	for i := 0; i < len(fields); i += 2 {
-		key := fields[i].(string)
-		val := fields[i+1].(string)
-		if key == "answer" {
-			answer = val
-		} else if key == "distance" {
-			fmt.Sscanf(val, "%f", &distance)
+	// 2. Safely parse the response based on the Protocol format (RESP2 vs RESP3)
+	switch v := res.(type) {
+
+	case []interface{}:
+		// --- RESP2 PARSING (Older Flat Array Format) ---
+		// local Redis 5 container (RESP2)
+		if len(v) == 0 {
+			return "", false
 		}
+		totalResults = v[0].(int64)
+		if totalResults == 0 {
+			slog.Info("💾 [Cache Miss] Index active, 0 matches found (RESP2)")
+			return "", false
+		}
+		if len(v) >= 3 {
+			fields := v[2].([]interface{})
+			for i := 0; i < len(fields); i += 2 {
+				key := fields[i].(string)
+				val := fields[i+1].(string)
+				if key == "answer" {
+					answer = val
+				}
+				if key == "distance" {
+					fmt.Sscanf(val, "%f", &distance)
+				}
+			}
+		}
+
+	case map[interface{}]interface{}:
+		// Google Cloud Memorystore Redis 7 instance (RESP3)
+		// --- RESP3 PARSING (Newer Map/Dictionary Format) ---
+
+		// Safely extract total_results
+		if total, ok := v["total_results"].(int64); ok {
+			totalResults = total
+		} else if total, ok := v["total_results"].(int); ok {
+			totalResults = int64(total)
+		}
+
+		if totalResults == 0 {
+			slog.Info("💾 [Cache Miss] Index active, 0 matches found (RESP3)")
+			return "", false
+		}
+
+		// Extract the results array
+		if resultsArr, ok := v["results"].([]interface{}); ok && len(resultsArr) > 0 {
+			// Get the first document
+			if doc, ok := resultsArr[0].(map[interface{}]interface{}); ok {
+				// In RESP3, the return fields are nested inside "extra_attributes"
+				fields := doc
+				if extra, hasExtra := doc["extra_attributes"].(map[interface{}]interface{}); hasExtra {
+					fields = extra
+				}
+
+				if ans, ok := fields["answer"].(string); ok {
+					answer = ans
+				}
+				if dist, ok := fields["distance"].(string); ok {
+					fmt.Sscanf(dist, "%f", &distance)
+				}
+			}
+		}
+
+	default:
+		slog.Error("❌ [Cache] Unrecognized Redis response type", "type", fmt.Sprintf("%T", res))
+		return "", false
 	}
 
-	// Convert Cosine Distance to Similarity (1.0 - distance)
+	// 3. Precision Math
 	similarity := 1.0 - distance
+	margin := similarity - threshold
 
-	// Extensive Logging for Observability
-	slog.Debug("🧮 Semantic Cache Evaluation",
-		"redis_raw_distance", distance,
-		"calculated_similarity", similarity,
+	slog.Info("🧮 [Cache Evaluation]",
+		"threshold", fmt.Sprintf("%.4f", threshold),
+		"similarity", fmt.Sprintf("%.4f", similarity),
+		"margin", fmt.Sprintf("%+.4f", margin),
 	)
 
 	if similarity >= threshold {
-		slog.Info("🎯 Semantic Cache Hit",
-			"similarity_score", fmt.Sprintf("%.4f", similarity),
-		)
+		slog.Info("🎯 [Cache Hit] Success!")
 		return answer, true
 	}
 
-	slog.Info("💨 Semantic Cache Miss (Below Threshold)",
-		"similarity_score", fmt.Sprintf("%.4f", similarity),
-	)
+	slog.Info("📉 [Cache Miss] Score too low")
 	return "", false
 }
 
@@ -145,7 +198,32 @@ func (q *QueryCache) SetCache(ctx context.Context, query string, answer string, 
 	return nil
 }
 
-// Helper: Redis requires vectors to be raw byte arrays
+func (q *QueryCache) FlushCache(ctx context.Context) error {
+	slog.Warn("🧹 [Cache Management] Strategic Wipe Initiated...")
+
+	// 1. Delete all keys with our prefix, but NOT the index schema itself
+	// This keeps the 'idx:cache' definition alive so GetCache never throws "No such index"
+	script := `
+        local keys = redis.call('keys', ARGV[1])
+        for i,k in ipairs(keys) do
+            redis.call('del', k)
+        end
+        return #keys
+    `
+	err := q.client.Eval(ctx, script, []string{}, PrefixCache+"*").Err()
+	if err != nil {
+		// Fallback: If script fails, we do the nuclear option but immediately re-index
+		q.client.FlushDB(ctx)
+		q.InitializeIndex(ctx)
+	}
+
+	// 2. Also wipe the session history (different prefix)
+	q.client.Eval(ctx, script, []string{}, "session:v1:*")
+
+	slog.Info("✅ [Cache Management] Strategic wipe complete. Schema preserved.")
+	return nil
+}
+
 func float32ToByte(f []float32) []byte {
 	buf := make([]byte, len(f)*4)
 	for i, v := range f {
