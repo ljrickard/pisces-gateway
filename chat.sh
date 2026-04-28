@@ -7,15 +7,9 @@ SESSION_ID=$2
 
 # Generate a ULID if one isn't provided as the second argument
 if [ -z "$SESSION_ID" ]; then
-    # If you have 'ulid' installed, use that. 
-    # Otherwise, this is a "poor man's ULID" using uuidgen + uppercase
-    # Note: Gateway validation is strict, so ensure this matches the ULID format
     if command -v ulid &> /dev/null; then
         SESSION_ID=$(ulid)
     else
-        # Fallback: Generate a random string that fits the ULID length/case 
-        # (Gateway might reject if checksum/alphabet isn't perfect, 
-        # so 'brew install ulid' is recommended)
         SESSION_ID=$(uuidgen | tr -d '-' | tr '[:lower:]' '[:upper:]' | cut -c 1-26)
     fi
 fi
@@ -24,8 +18,26 @@ echo "🚀 Sending request with SessionID: $SESSION_ID"
 echo "💬 Message: $MESSAGE"
 echo "--------------------------------------------"
 
+# Construct the JSON payload with the nested, domain-specific config
+JSON_PAYLOAD=$(cat <<EOF
+{
+  "message": "$MESSAGE",
+  "config": {
+    "frasier": {
+      "fetch_k": 20,
+      "final_k": 5,
+      "specific_scale_fetch": 0.50,
+      "specific_scale_final": 0.50
+    }
+  }
+}
+EOF
+)
+
+# Fire the request testing both Gateway Headers and Bot Payload
 curl -i -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
   -H "X-Pisces-Session-ID: $SESSION_ID" \
-  -H "X-Pisces-Flag-BypassCache: false" \
-  -d "{\"message\": \"$MESSAGE\"}"
+  -H "X-Pisces-Flag-SkipCache: true" \
+  -H "X-Pisces-Similarity-Threshold: 0.95" \
+  -d "$JSON_PAYLOAD"

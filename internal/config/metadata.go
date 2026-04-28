@@ -3,17 +3,12 @@ package config
 import (
 	"net/http"
 	"strconv"
-
-	"github.com/oklog/ulid/v2"
-)
-
-const (
-	// The absolute default if no header is provided.
-	fallbackHistoryLimit = 20
+	"strings"
 )
 
 type FeatureState struct {
-	BypassCache         bool
+	SkipCache           bool
+	SimilarityThreshold float64
 	ContextHistoryLimit int
 }
 
@@ -23,26 +18,36 @@ type RequestMetadata struct {
 }
 
 func ParseRequestMetadata(r *http.Request) (RequestMetadata, bool) {
-	// 1. Validate SessionID (ULID)
 	sessionID := r.Header.Get("X-Pisces-Session-ID")
-	parsedULID, err := ulid.Parse(sessionID)
-	if err != nil {
+	if sessionID == "" {
 		return RequestMetadata{}, false
 	}
 
-	// 2. Resolve History Limit (Header override or constant fallback)
-	limit := fallbackHistoryLimit
+	flags := FeatureState{
+		SkipCache:           false,
+		SimilarityThreshold: 0.90,
+		ContextHistoryLimit: 20,
+	}
+
+	if skip := r.Header.Get("X-Pisces-Flag-SkipCache"); skip != "" {
+		flags.SkipCache = strings.ToLower(skip) == "true"
+	}
+
+	if thresholdStr := r.Header.Get("X-Pisces-Similarity-Threshold"); thresholdStr != "" {
+		parsed, err := strconv.ParseFloat(thresholdStr, 64)
+		if err == nil && parsed >= 0.0 && parsed <= 1.0 {
+			flags.SimilarityThreshold = parsed
+		}
+	}
+
 	if headerVal := r.Header.Get("X-Pisces-Flag-ContextHistoryLimit"); headerVal != "" {
 		if val, err := strconv.Atoi(headerVal); err == nil && val > 0 {
-			limit = val
+			flags.ContextHistoryLimit = val
 		}
 	}
 
 	return RequestMetadata{
-		SessionID: parsedULID.String(),
-		Flags: FeatureState{
-			BypassCache:         r.Header.Get("X-Pisces-Flag-BypassCache") == "true",
-			ContextHistoryLimit: limit,
-		},
+		SessionID: sessionID,
+		Flags:     flags,
 	}, true
 }

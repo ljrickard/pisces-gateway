@@ -20,7 +20,8 @@ import (
 
 // ChatRequest represents the incoming JSON body from the user
 type ChatRequest struct {
-	Message string `json:"message"`
+	Message string         `json:"message"`
+	Config  map[string]any `json:"config,omitempty"`
 }
 
 // checkBotHealth ensures the downstream Frasier Chat service is alive before starting
@@ -156,7 +157,7 @@ func main() {
 
 		metadata, valid := config.ParseRequestMetadata(r)
 		if !valid {
-			http.Error(w, "Missing or invalid X-Pisces-Session-ID header", http.StatusBadRequest)
+			http.Error(w, "Missing or Invalid Metadata Headers", http.StatusBadRequest)
 			return
 		}
 
@@ -167,7 +168,7 @@ func main() {
 			return
 		}
 
-		answer := p.Execute(r.Context(), req.Message, metadata.SessionID, metadata.Flags)
+		answer := p.Execute(r.Context(), req.Message, metadata.SessionID, metadata.Flags, req.Config)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{

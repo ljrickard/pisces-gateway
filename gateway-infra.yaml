@@ -22,6 +22,7 @@ metadata:
 spec:
   default:
     securityPolicy: pisces-gateway-allowlist # Your Cloud Armor policy
+    timeoutSec: 120
   targetRef:
     group: ""
     kind: Service

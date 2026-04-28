@@ -44,7 +44,7 @@ type Pipeline struct {
 	FrasierBot   *proxy.FrasierClient
 }
 
-func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID string, flags config.FeatureState) string {
+func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID string, flags config.FeatureState, botConfigs map[string]any) string {
 	// 1. Fetch History & Rewrite the Query
 	rewritten := rawQuery
 	if p.Rewriter != nil {
@@ -56,9 +56,9 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 		rewritten = p.Rewriter.Resolve(ctx, rawQuery, history)
 	}
 
-	// 2. Generate the Embedding Vector (Only if we aren't bypassing the cache!)
+	// 2. Generate the Embedding Vector
 	var queryVector []float32
-	if p.Embedder != nil && !flags.BypassCache {
+	if p.Embedder != nil && !flags.SkipCache {
 		var err error
 		queryVector, err = p.Embedder.EmbedText(ctx, rewritten)
 		if err != nil {
@@ -66,9 +66,9 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 		}
 	}
 
-	// 3. Check the Gateway Cache
-	if !flags.BypassCache && queryVector != nil {
-		if cached, hit := p.Querycache.GetCache(ctx, queryVector); hit {
+	// 3. Check the Gateway Cache using the dynamic threshold from flags!
+	if !flags.SkipCache && queryVector != nil {
+		if cached, hit := p.Querycache.GetCache(ctx, queryVector, flags.SimilarityThreshold); hit {
 			return cached
 		}
 	}
@@ -86,7 +86,11 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 		payload := map[string]any{
 			"query":      rewritten,
 			"session_id": sessionID,
-			"config":     flags,
+		}
+
+		if specificConfig, exists := botConfigs[domain]; exists {
+			payload["config"] = specificConfig
+			slog.Debug("Attached domain-specific config to downstream payload", "domain", domain)
 		}
 
 		botResponse, err := p.FrasierBot.ForwardChat(ctx, payload)
@@ -110,7 +114,7 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 	// 5. Update Cache and History (Only on success paths)
 	go func() {
 		bgCtx := context.Background()
-		if !flags.BypassCache && queryVector != nil {
+		if !flags.SkipCache && queryVector != nil {
 			// Now passing the vector along with the text!
 			p.Querycache.SetCache(bgCtx, rewritten, answer, queryVector, 1*time.Hour)
 		}

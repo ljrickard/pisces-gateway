@@ -13,8 +13,7 @@ import (
 )
 
 const (
-	PrefixCache         = "cache:v1:"
-	SimilarityThreshold = 0.90
+	PrefixCache = "cache:v1:"
 )
 
 type QueryCache struct {
@@ -50,7 +49,7 @@ func (c *QueryCache) InitializeIndex(ctx context.Context) error {
 }
 
 // GetCache performs a Vector KNN search in Redis
-func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32) (string, bool) {
+func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, threshold float64) (string, bool) {
 	vectorBytes := float32ToByte(queryVector)
 
 	// FT.SEARCH query: Find the 1 nearest neighbor using the vector
@@ -104,8 +103,7 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32) (strin
 		"calculated_similarity", similarity,
 	)
 
-	// Threshold check (Assuming you defined SimilarityThreshold = 0.90 at the top of the file)
-	if similarity >= SimilarityThreshold {
+	if similarity >= threshold {
 		slog.Info("🎯 Semantic Cache Hit",
 			"similarity_score", fmt.Sprintf("%.4f", similarity),
 		)
