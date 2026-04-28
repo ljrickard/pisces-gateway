@@ -49,16 +49,17 @@ func main() {
 	slog.Info("🐟 Starting Pisces API Gateway...")
 
 	geminiCfg := gemini.Config{
-		ProjectID: os.Getenv("GEMINI_PROJECT"),
-		Location:  os.Getenv("GEMINI_LOCATION"),
-		Model:     os.Getenv("GEMINI_MODEL"),
+		ProjectID:      os.Getenv("GEMINI_PROJECT"),
+		Location:       os.Getenv("GEMINI_LOCATION"),
+		TextModel:      os.Getenv("GEMINI_MODEL"),
+		EmbeddingModel: os.Getenv("EMBEDDING_MODEL"),
 		Retry: gemini.RetryConfig{
 			MaxRetries: 3,
 			BaseDelay:  2 * time.Second,
 		},
 	}
 
-	if geminiCfg.Model == "" {
+	if geminiCfg.TextModel == "" {
 		slog.Error("❌ GEMINI_MODEL environment variable is not set")
 		os.Exit(1)
 	}
@@ -70,7 +71,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID, "model", geminiCfg.Model)
+	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID,
+		"TextModel", geminiCfg.TextModel, "EmbeddingModel", geminiCfg.EmbeddingModel)
 
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
@@ -99,6 +101,11 @@ func main() {
 		Timeout:    50 * time.Millisecond,
 		MaxRetries: 0,
 	})
+	err = queryCache.InitializeIndex(startupCtx)
+	if err != nil {
+		slog.Error("❌ Query Cache Failed to Initialize Index", "error", err)
+		os.Exit(1)
+	}
 
 	// 3. Session Store: Resilient (100ms timeout, 2 retries)
 	sessionStore := cache.NewSessionStore(rawRedis, cache.RetryConfig{
@@ -118,6 +125,7 @@ func main() {
 	p := &pipeline.Pipeline{
 		Rewriter:     &rewrite.GeminiRewriter{LLM: geminiClient},
 		Intent:       &intent.Classifier{LLM: geminiClient},
+		Embedder:     geminiClient,
 		Sessionstore: sessionStore,
 		Querycache:   queryCache,
 		FrasierBot:   frasierClient,

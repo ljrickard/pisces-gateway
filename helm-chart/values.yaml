@@ -6,10 +6,10 @@ serviceAccountName: pisces-gateway-ksa
 
 env:
   LOGGING_LEVEL: "DEBUG"
-  REDIS_ADDR: "10.73.104.43:6379"
   FRASIER_BOT_URL: "http://frasier-chat-svc"
 
 gemini:
   project: "pisces-12"
   location: "us-central1"
   model: "gemini-2.5-flash"
+  embedding_model: "text-embedding-004"

@@ -16,7 +16,7 @@ type FrasierClient struct {
 }
 
 func NewFrasierClient(url string) (*FrasierClient, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 65 * time.Second}
 
 	// Perform the health check before returning
 	resp, err := client.Get(fmt.Sprintf("%s/health", url))
@@ -53,6 +53,10 @@ func (c *FrasierClient) ForwardChat(ctx context.Context, payload any) (map[strin
 		return nil, fmt.Errorf("failed to reach frasier bot: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("downstream service returned HTTP %d", resp.StatusCode)
+	}
 
 	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

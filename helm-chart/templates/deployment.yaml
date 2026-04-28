@@ -27,7 +27,7 @@ spec:
             periodSeconds: 5
           env:
             - name: REDIS_ADDR
-              value: {{ .Values.env.REDIS_ADDR | quote }}
+              value: "pisces-gateway-redis-svc:6379"
             - name: LOGGING_LEVEL
               value: {{ .Values.env.LOGGING_LEVEL | quote }}
             - name: FRASIER_BOT_URL
@@ -38,3 +38,5 @@ spec:
               value: {{ .Values.gemini.location | quote }}
             - name: GEMINI_MODEL
               value: {{ .Values.gemini.model | quote }}            
+            - name: EMBEDDING_MODEL
+              value: {{ .Values.gemini.embedding_model | quote }}

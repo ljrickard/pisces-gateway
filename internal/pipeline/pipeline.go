@@ -30,10 +30,15 @@ type Intent interface {
 	Determine(ctx context.Context, query string) string
 }
 
+type Embedder interface {
+	EmbedText(ctx context.Context, text string) ([]float32, error)
+}
+
 type Pipeline struct {
 	Normalizer   Normalizer
 	Rewriter     *rewrite.GeminiRewriter
 	Intent       *intent.Classifier
+	Embedder     Embedder
 	Querycache   *cache.QueryCache
 	Sessionstore *cache.SessionStore
 	FrasierBot   *proxy.FrasierClient
@@ -51,10 +56,19 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 		rewritten = p.Rewriter.Resolve(ctx, rawQuery, history)
 	}
 
-	// 2. Check the Gateway Cache
-	if !flags.BypassCache {
-		if cached, hit := p.Querycache.GetCache(ctx, rewritten); hit {
-			slog.Info("🎯 Gateway Cache Hit", "query", rewritten)
+	// 2. Generate the Embedding Vector (Only if we aren't bypassing the cache!)
+	var queryVector []float32
+	if p.Embedder != nil && !flags.BypassCache {
+		var err error
+		queryVector, err = p.Embedder.EmbedText(ctx, rewritten)
+		if err != nil {
+			slog.Error("⚠️ Embedder failed, bypassing semantic cache", "error", err)
+		}
+	}
+
+	// 3. Check the Gateway Cache
+	if !flags.BypassCache && queryVector != nil {
+		if cached, hit := p.Querycache.GetCache(ctx, queryVector); hit {
 			return cached
 		}
 	}
@@ -96,8 +110,9 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 	// 5. Update Cache and History (Only on success paths)
 	go func() {
 		bgCtx := context.Background()
-		if !flags.BypassCache {
-			p.Querycache.SetCache(bgCtx, rewritten, answer, 1*time.Hour)
+		if !flags.BypassCache && queryVector != nil {
+			// Now passing the vector along with the text!
+			p.Querycache.SetCache(bgCtx, rewritten, answer, queryVector, 1*time.Hour)
 		}
 		p.Sessionstore.SaveSession(bgCtx, sessionID, "User: "+rawQuery)
 		p.Sessionstore.SaveSession(bgCtx, sessionID, "Bot: "+answer)
