@@ -3,12 +3,13 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"time"
+
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
 	"pisces-gateway/internal/intent"
 	"pisces-gateway/internal/proxy"
 	"pisces-gateway/internal/rewrite"
-	"time"
 )
 
 type Normalizer interface {
@@ -44,7 +45,7 @@ type Pipeline struct {
 	FrasierBot   *proxy.FrasierClient
 }
 
-func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID string, flags config.FeatureState, botConfigs map[string]any) string {
+func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID string, flags config.FeatureState, botConfigs map[string]any) (string, []string) {
 	slog.Info("🚀 [Pipeline Start]", "session_id", sessionID, "raw_query", rawQuery)
 
 	// 1. Fetch History & Rewrite the Query
@@ -54,7 +55,7 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 		history, err := p.Sessionstore.GetSession(ctx, sessionID, flags.ContextHistoryLimit)
 		if err != nil {
 			slog.Error("❌ GetSession returned an error", "error", err)
-			return "I encountered an issue retrieving your session. Please try again."
+			return "I encountered an issue retrieving your session. Please try again.", nil
 		}
 
 		slog.Info("📖 [Session History]", "messages_retrieved", len(history), "history_content", history)
@@ -82,7 +83,7 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 
 		if cached, hit := p.Querycache.GetCache(ctx, queryVector, flags.SimilarityThreshold); hit {
 			slog.Info("🛑 [Pipeline Halted] Returning cached response early.")
-			return cached
+			return cached, nil
 		}
 		slog.Info("💨 [Pipeline Continuing] Proceeding to backend routing.")
 	} else {
@@ -99,6 +100,7 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 	}
 
 	var answer string
+	contexts := make([]string, 0) // Prevents the JSON 'null' issue! Always serializes to []
 
 	// 5. Route based on Domain
 	if domain == "frasier" {
@@ -115,16 +117,55 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 		slog.Info("📞 [Network] Forwarding to downstream bot...", "domain", domain)
 		botResponse, err := p.FrasierBot.ForwardChat(ctx, payload)
 		if err != nil {
-			slog.Error("❌ Failed to reach downstream service", "domain", domain, "error", err)
-			return "I'm currently unable to reach the requested service. Please try again later."
+			slog.Error("❌ [Network] Failed to reach downstream bot", "error", err)
+			return "I'm having trouble reaching the Frasier bot right now. Please try again later.", contexts
 		}
 
-		var ok bool
-		answer, ok = botResponse["answer"].(string)
-		if !ok {
-			slog.Error("❌ Unexpected response format from downstream service", "domain", domain)
-			return "I received an invalid response from the backend service. Please try again."
+		// Log exactly what the bot sent us so we can see the keys and structure
+		slog.Debug("📦 [Gateway] Raw Downstream Payload", "len(payload)", len(botResponse))
+
+		// --- 5a. Safely extract the Answer ---
+		if rawAns, ok := botResponse["answer"].(string); ok {
+			answer = rawAns
+		} else if rawResp, ok := botResponse["response"].(string); ok {
+			answer = rawResp
+		} else if nested, ok := botResponse["response"].(map[string]any); ok {
+			// If it got accidentally nested like {"response": {"answer": "..."}}
+			if nestedAns, ok := nested["answer"].(string); ok {
+				answer = nestedAns
+			}
+		} else {
+			slog.Warn("⚠️ Gateway could not find a string answer in the bot payload", "payload", botResponse)
 		}
+
+		// --- 5b. Safely extract the Contexts ---
+		var rawArray []any
+		var isArray bool
+
+		// Check both common keys
+		if rawArray, isArray = botResponse["contexts"].([]any); !isArray {
+			rawArray, isArray = botResponse["episodes"].([]any)
+		}
+
+		if isArray {
+			for _, item := range rawArray {
+				// CASE 1: The downstream bot sent a flat array of strings
+				if strChunk, ok := item.(string); ok {
+					contexts = append(contexts, strChunk)
+				} else if mapChunk, ok := item.(map[string]any); ok {
+					// CASE 2: The downstream bot sent an array of objects (like your logs show)
+					// We need to pull out the actual text transcript field (usually "content" or "text")
+					if contentStr, ok := mapChunk["content"].(string); ok {
+						contexts = append(contexts, contentStr)
+					} else if textStr, ok := mapChunk["text"].(string); ok {
+						contexts = append(contexts, textStr)
+					}
+				}
+			}
+		} else {
+			slog.Warn("⚠️ Gateway found neither 'contexts' nor 'episodes' as a valid array in the bot payload")
+		}
+
 		slog.Info("✅ [Network] Downstream bot replied successfully.")
 	} else {
 		// Generic fallback for any unhandled domains
@@ -145,5 +186,5 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 	}()
 
 	slog.Info("🏁 [Pipeline Complete]")
-	return answer
+	return answer, contexts
 }

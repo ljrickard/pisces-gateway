@@ -167,11 +167,11 @@ func main() {
 			return
 		}
 
-		answer := p.Execute(r.Context(), req.Message, metadata.SessionID, metadata.Flags, req.Config)
-
+		answer, contexts := p.Execute(r.Context(), req.Message, metadata.SessionID, metadata.Flags, req.Config)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
+		json.NewEncoder(w).Encode(map[string]any{
 			"response": answer,
+			"contexts": contexts,
 		})
 	})
 
