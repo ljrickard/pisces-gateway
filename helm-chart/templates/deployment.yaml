@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}
 spec:
-  replicas: 1
+  replicas: 2 # <-- High Availability enabled
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -13,12 +13,31 @@ spec:
         app: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Values.serviceAccountName }}
+      # --- THE SPOT INSTANCE HA CHEAT CODE ---
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - {{ .Release.Name }}
+            topologyKey: "kubernetes.io/hostname"
+      # ---------------------------------------
       containers:
         - name: gateway
           image: "{{ .Values.image.repository }}:{{ .Chart.Version }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: 8080
+          resources:
+            requests:
+              cpu: "500m"   # <-- 0.5 vCPU
+              memory: "2Gi"
+            limits:
+              cpu: "500m"
+              memory: "2Gi"
           readinessProbe:
             httpGet:
               path: /health

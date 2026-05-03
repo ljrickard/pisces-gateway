@@ -16,10 +16,11 @@ type RetryConfig struct {
 	BaseDelay  time.Duration
 }
 
-// 1. Two separate configurable models
+// 1. Config struct updated with APIKey
 type Config struct {
 	ProjectID      string
 	Location       string
+	APIKey         string
 	TextModel      string
 	EmbeddingModel string
 	Retry          RetryConfig
@@ -33,11 +34,20 @@ type Client struct {
 }
 
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {
-	c, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Project:  cfg.ProjectID,
-		Location: cfg.Location,
-		Backend:  genai.BackendVertexAI,
-	})
+	clientConfig := &genai.ClientConfig{}
+
+	// If API Key is provided, use it and route to the AI Studio Backend
+	if cfg.APIKey != "" {
+		clientConfig.APIKey = cfg.APIKey
+		clientConfig.Backend = genai.BackendGeminiAPI
+	} else {
+		// Fallback to federated identity (Vertex AI) if no key is present
+		clientConfig.Project = cfg.ProjectID
+		clientConfig.Location = cfg.Location
+		clientConfig.Backend = genai.BackendVertexAI
+	}
+
+	c, err := genai.NewClient(ctx, clientConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize genai client: %w", err)
 	}
@@ -91,15 +101,22 @@ func (c *Client) GenerateText(ctx context.Context, prompt string) (string, error
 	return answer, nil
 }
 
-// 3. The Embedding Generator (Satisfies the Embedder Interface!)
+// 3. The Embedding Generator (Satisfies the Embedder Interface)
 func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
 	if c.embeddingModel == "" {
 		return nil, fmt.Errorf("embedding model is not configured")
 	}
 
-	// Reusing the exact same retry logic for a completely different return type
+	// Create the configuration to truncate the model output
+	// to match your existing PostgreSQL 768-dimension schema
+	outputDim := int32(768)
+	embedConfig := &genai.EmbedContentConfig{
+		OutputDimensionality: &outputDim,
+	}
+
+	// Note that we pass embedConfig instead of nil here!
 	resp, err := executeWithRetry(ctx, c.retryCfg, func() (*genai.EmbedContentResponse, error) {
-		return c.rawClient.Models.EmbedContent(ctx, c.embeddingModel, genai.Text(text), nil)
+		return c.rawClient.Models.EmbedContent(ctx, c.embeddingModel, genai.Text(text), embedConfig)
 	})
 
 	if err != nil {
@@ -114,7 +131,6 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 }
 
 // 4. The Generic Retry Wrapper [T any]
-// This replaces callWithRetry and works for ANY function return type!
 func executeWithRetry[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) (T, error) {
 	var zero T // Go needs this to return an empty value on total failure
 
@@ -150,7 +166,6 @@ func executeWithRetry[T any](ctx context.Context, cfg RetryConfig, fn func() (T,
 }
 
 func (c *Client) extractText(resp *genai.GenerateContentResponse) string {
-	// ... [Keep your existing extractText logic here] ...
 	if resp == nil || len(resp.Candidates) == 0 {
 		return ""
 	}

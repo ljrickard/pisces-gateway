@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +17,9 @@ import (
 	"pisces-gateway/internal/pipeline"
 	"pisces-gateway/internal/proxy"
 	"pisces-gateway/internal/rewrite"
+
+	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 )
 
 // ChatRequest represents the incoming JSON body from the user
@@ -49,7 +53,17 @@ func main() {
 
 	slog.Info("🐟 Starting Pisces API Gateway...")
 
+	startupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	projectID := "pisces-12"
+	secretName := "gemini-api-key"
+	apiKey, err := getSecret(startupCtx, projectID, secretName)
+	if err != nil {
+		log.Fatalf("Error loading API key from Secret Manager: %v", err)
+	}
+
 	geminiCfg := gemini.Config{
+		APIKey:         apiKey,
 		ProjectID:      os.Getenv("GEMINI_PROJECT"),
 		Location:       os.Getenv("GEMINI_LOCATION"),
 		TextModel:      os.Getenv("GEMINI_MODEL"),
@@ -65,8 +79,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
-	geminiClient, err := gemini.NewClient(ctx, geminiCfg)
+	if geminiCfg.ProjectID == "" {
+		slog.Error("❌ GEMINI_MODEL or GEMINI_PROJECT environment variable is not set")
+		os.Exit(1)
+	}
+
+	slog.Info("✅ Using Gemini config", slog.Any("geminiCfg", geminiCfg))
+
+	geminiClient, err := gemini.NewClient(startupCtx, geminiCfg)
 	if err != nil {
 		slog.Error("❌ Critical failure: Gemini unreachable", "error", err)
 		os.Exit(1)
@@ -87,7 +107,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	startupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// 1. Establish the shared base connection
@@ -199,4 +218,25 @@ func main() {
 		slog.Error("❌ Gateway server crashed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// getSecret securely fetches the string value of a secret from GCP Secret Manager
+func getSecret(ctx context.Context, projectID, secretName string) (string, error) {
+	smClient, err := secretmanager.NewClient(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to create Secret Manager client: %v", err)
+	}
+	defer smClient.Close()
+
+	versionPath := fmt.Sprintf("projects/%s/secrets/%s/versions/latest", projectID, secretName)
+	req := &secretmanagerpb.AccessSecretVersionRequest{
+		Name: versionPath,
+	}
+
+	result, err := smClient.AccessSecretVersion(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("failed to access secret version: %v", err)
+	}
+
+	return string(result.Payload.Data), nil
 }

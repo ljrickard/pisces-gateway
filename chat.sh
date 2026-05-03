@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-ENDPOINT="http://34.160.141.167/chat"
-CACHE_ENDPOINT="http://34.160.141.167/cache"
+ENDPOINT="http://34.8.247.193/chat"
+CACHE_ENDPOINT="http://34.8.247.193/cache"
 
 # Check for wipe flag
 if [[ "$1" == "--wipe" ]]; then

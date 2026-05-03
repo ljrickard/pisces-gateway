@@ -83,6 +83,16 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, sessionID strin
 
 		if cached, hit := p.Querycache.GetCache(ctx, queryVector, flags.SimilarityThreshold); hit {
 			slog.Info("🛑 [Pipeline Halted] Returning cached response early.")
+
+			// --- THE FIX: Save the session history even on a cache hit ---
+			go func() {
+				bgCtx := context.Background()
+				slog.Debug("Saving cached conversation to Session Store...")
+				p.Sessionstore.SaveSession(bgCtx, sessionID, "User: "+rawQuery)
+				p.Sessionstore.SaveSession(bgCtx, sessionID, "Bot: "+cached)
+			}()
+			// -------------------------------------------------------------
+
 			return cached, nil
 		}
 		slog.Info("💨 [Pipeline Continuing] Proceeding to backend routing.")

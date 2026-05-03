@@ -12,4 +12,4 @@ gemini:
   project: "pisces-12"
   location: "us-central1"
   model: "gemini-2.5-flash"
-  embedding_model: "text-embedding-004"
+  embedding_model: "gemini-embedding-001"
