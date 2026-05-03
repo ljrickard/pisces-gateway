@@ -28,7 +28,6 @@ type ChatRequest struct {
 	Config  map[string]any `json:"config,omitempty"`
 }
 
-// checkBotHealth ensures the downstream Frasier Chat service is alive before starting
 func checkBotHealth(botURL string) error {
 	client := http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("%s/health", botURL))
@@ -44,7 +43,6 @@ func checkBotHealth(botURL string) error {
 }
 
 func main() {
-	// 1. Logger Setup
 	level := slog.LevelInfo
 	if os.Getenv("LOGGING_LEVEL") == "DEBUG" {
 		level = slog.LevelDebug
@@ -109,14 +107,12 @@ func main() {
 
 	defer cancel()
 
-	// 1. Establish the shared base connection
 	rawRedis, err := cache.NewRedisConnection(startupCtx, os.Getenv("REDIS_ADDR"))
 	if err != nil {
 		slog.Error("❌ Failed to connect to Redis", "error", err)
 		os.Exit(1)
 	}
 
-	// 2. Query Cache: Fail-Fast (50ms timeout, 0 retries)
 	queryCache := cache.NewQueryCache(rawRedis, cache.RetryConfig{
 		Timeout:    50 * time.Millisecond,
 		MaxRetries: 0,
@@ -127,7 +123,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Session Store: Resilient (100ms timeout, 2 retries)
 	sessionStore := cache.NewSessionStore(rawRedis, cache.RetryConfig{
 		Timeout:    100 * time.Millisecond,
 		MaxRetries: 2,
@@ -175,7 +170,7 @@ func main() {
 
 		metadata, valid := config.ParseRequestMetadata(r)
 		if !valid {
-			http.Error(w, "Missing or Invalid Metadata Headers", http.StatusBadRequest)
+			http.Error(w, "Missing, malformed, or invalid Metadata Headers (X-Pisces-Session-ID must be a valid ULID)", http.StatusBadRequest)
 			return
 		}
 
@@ -194,14 +189,12 @@ func main() {
 		})
 	})
 
-	// DELETE /cache - Admin endpoint to wipe the Redis database for evaluation runs
 	mux.HandleFunc("/cache", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// Call the FlushCache method we added to QueryCache earlier
 		if err := queryCache.FlushCache(r.Context()); err != nil {
 			slog.Error("❌ Failed to flush Redis cache via API", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -220,7 +213,6 @@ func main() {
 	}
 }
 
-// getSecret securely fetches the string value of a secret from GCP Secret Manager
 func getSecret(ctx context.Context, projectID, secretName string) (string, error) {
 	smClient, err := secretmanager.NewClient(ctx)
 	if err != nil {

@@ -46,7 +46,7 @@ spec:
             periodSeconds: 5
           env:
             - name: REDIS_ADDR
-              value: "pisces-gateway-redis-svc:6379"
+              value: "pisces-gateway-redis-svc.default.svc.cluster.local:6379"
             - name: LOGGING_LEVEL
               value: {{ .Values.env.LOGGING_LEVEL | quote }}
             - name: FRASIER_BOT_URL
