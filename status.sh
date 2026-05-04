@@ -1,35 +1,43 @@
 #!/bin/bash
-# status.sh - Pisces Infrastructure Status Checker
+# status.sh - Pisces Infrastructure Status Tracker (Zonal Edition)
 
-# Define colors for output
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m' 
 
-echo -e "${BLUE}🐟 Pisces Infrastructure Status Report ${NC}"
-echo "=================================================="
+echo -e "${BLUE}🐟 Pisces Infrastructure Zonal Status Report ${NC}"
+echo "===================================================================================="
 
-echo -e "\n${YELLOW}1. 🖥️  Node Status (Spot Instances)${NC}"
-kubectl get nodes
+echo -e "\n${YELLOW}1. 🖥️  Node Inventory & Health${NC}"
+kubectl get nodes -L topology.kubernetes.io/zone
 
-echo -e "\n${YELLOW}2. 📦 Pod Status (Gateway, Frasier Bot, Redis, Cross-Encoder)${NC}"
-kubectl get pods -o custom-columns="NAME:.metadata.name,READY:.status.containerStatuses[*].ready,STATUS:.status.phase,RESTARTS:.status.containerStatuses[*].restartCount,AGE:.metadata.creationTimestamp"
+echo -e "\n${YELLOW}2. 📦 Deployment Zonal Distribution${NC}"
+# This command joins the Pod nodeName with the Node's zone label for precision
+printf "%-40s %-20s %-15s %-10s\n" "POD NAME" "NODE" "ZONE" "STATUS"
+echo "------------------------------------------------------------------------------------"
 
-echo -e "\n${YELLOW}3. 🔌 Internal Services (Routing)${NC}"
+# Targets gateway, frasier, and cross-encoder
+kubectl get pods -o json | jq -r '.items[] | select(.metadata.labels.app != null) | [
+    .metadata.name, 
+    .spec.nodeName, 
+    (.metadata.labels["topology.kubernetes.io/zone"] // "Fetching..."), 
+    .status.phase
+] | @tsv' | while IFS=$'\t' read -r name node zone status; do
+    # If the pod doesn't have the label, we look up the node's zone directly
+    if [ "$zone" == "Fetching..." ]; then
+        zone=$(kubectl get node "$node" -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}' 2>/dev/null)
+    fi
+    printf "%-40s %-20s %-15s %-10s\n" "$name" "$node" "$zone" "$status"
+done
+
+echo -e "\n${YELLOW}3. 🔌 Internal Services${NC}"
 kubectl get svc
 
-echo -e "\n${YELLOW}4. 🌐 External Gateway & Routes (Load Balancer)${NC}"
+echo -e "\n${YELLOW}4. 🌐 Gateway API & Load Balancer${NC}"
 kubectl get gateway,httproute
 
-echo -e "\n${YELLOW}5. 🛡️  Security Policies (GCPBackendPolicy)${NC}"
-kubectl get gcpbackendpolicy
-
-echo -e "\n${YELLOW}6. ⚠️  Recent Cluster Warnings (Last 5)${NC}"
+echo -e "\n${YELLOW}5. ⚠️  Active Cluster Warnings${NC}"
 kubectl get events --field-selector type=Warning --sort-by='.metadata.creationTimestamp' | tail -n 5
 
-echo -e "\n${BLUE}==================================================${NC}"
-echo -e "💡 Troubleshooting 'Connection reset by peer':"
-echo -e "   1. Check if the Pods are actually 'Running' in Step 2."
-echo -e "   2. Check if the Gateway has an IP address assigned in Step 4."
-echo -e "   3. Run ${RED}kubectl logs -l app=pisces-gateway${NC} to check for Go app panics."
+echo -e "\n${BLUE}====================================================================================${NC}"
