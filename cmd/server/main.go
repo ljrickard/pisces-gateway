@@ -10,6 +10,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/uuid"
+
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
 	"pisces-gateway/internal/gemini"
@@ -27,6 +29,54 @@ type ChatRequest struct {
 	Message string         `json:"message"`
 	Config  map[string]any `json:"config,omitempty"`
 }
+
+// --- OpenAI Spec Structs ---
+type OpenAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type OpenAIChatRequest struct {
+	Model    string          `json:"model"`
+	Messages []OpenAIMessage `json:"messages"`
+	Stream   bool            `json:"stream,omitempty"`
+}
+
+type OpenAIChoice struct {
+	Index        int           `json:"index"`
+	Message      OpenAIMessage `json:"message"`
+	FinishReason string        `json:"finish_reason"`
+}
+
+type OpenAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+type OpenAIChatResponse struct {
+	ID      string         `json:"id"`
+	Object  string         `json:"object"`
+	Created int64          `json:"created"`
+	Model   string         `json:"model"`
+	Choices []OpenAIChoice `json:"choices"`
+	Usage   OpenAIUsage    `json:"usage"`
+}
+
+// Add these structs near your other OpenAI structs
+type OpenAIModel struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+type OpenAIModelsResponse struct {
+	Object string        `json:"object"`
+	Data   []OpenAIModel `json:"data"`
+}
+
+// ---------------------------
 
 func checkBotHealth(botURL string) error {
 	client := http.Client{Timeout: 5 * time.Second}
@@ -174,15 +224,24 @@ func main() {
 			return
 		}
 
+		// Look for Client Request ID, generate one if missing
+		requestID := r.Header.Get("X-Client-Request-Id")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+
 		var req ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Warn("Malformed request body", "error", err)
+			slog.Warn("Malformed request body", "request_id", requestID, "error", err)
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
 
-		answer, contexts := p.Execute(r.Context(), req.Message, metadata.SessionID, metadata.Flags, req.Config)
+		// Call the Stateful Wrapper
+		answer, contexts := p.ExecuteWithSession(r.Context(), req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config)
+
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-request-id", requestID) // Echo ID back
 		json.NewEncoder(w).Encode(map[string]any{
 			"response": answer,
 			"contexts": contexts,
@@ -204,6 +263,98 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "success", "message": "Redis cache completely wiped"}`))
+	})
+
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Look for Client Request ID, generate one if missing
+		requestID := r.Header.Get("X-Client-Request-Id")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+
+		var req OpenAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Warn("Malformed OpenAI request body", "request_id", requestID, "error", err)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		// Extract the history array and the last user message
+		var history []string
+		var lastUserMessage string
+
+		if len(req.Messages) > 0 {
+			lastUserMessage = req.Messages[len(req.Messages)-1].Content
+
+			// Build history from all prior messages (excluding the final query)
+			for i := 0; i < len(req.Messages)-1; i++ {
+				msg := req.Messages[i]
+				prefix := "User: "
+				if msg.Role == "assistant" {
+					prefix = "Bot: "
+				} else if msg.Role == "system" {
+					prefix = "System: "
+				}
+				history = append(history, prefix+msg.Content)
+			}
+		}
+
+		metadata, _ := config.ParseRequestMetadata(r)
+
+		// Force NoSession to true for OpenAI spec since history is provided in the payload
+		metadata.Flags.NoSession = true
+
+		// Call the Pure Pipeline directly (Bypassing Redis)
+		answer, _ := p.Execute(r.Context(), lastUserMessage, history, requestID, metadata.Flags, map[string]any{})
+
+		// Format the string response back into the standard OpenAI JSON shape
+		resp := OpenAIChatResponse{
+			ID:      fmt.Sprintf("chatcmpl-%s", requestID), // Tie the trace to the OpenAI completion ID!
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   req.Model,
+			Choices: []OpenAIChoice{
+				{
+					Index: 0,
+					Message: OpenAIMessage{
+						Role:    "assistant",
+						Content: answer,
+					},
+					FinishReason: "stop",
+				},
+			},
+			Usage: OpenAIUsage{
+				PromptTokens:     0,
+				CompletionTokens: 0,
+				TotalTokens:      0,
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-request-id", requestID) // Echo ID back
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	// Add this handler in your main() function alongside the others
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		resp := OpenAIModelsResponse{
+			Object: "list",
+			Data: []OpenAIModel{
+				{
+					ID:      "pisces",
+					Object:  "model",
+					Created: time.Now().Unix(),
+					OwnedBy: "ljrickard",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	slog.Info("🚀 Pisces Gateway listening on :8080")

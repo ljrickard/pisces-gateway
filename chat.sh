@@ -48,6 +48,6 @@ EOF
 curl -i -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
   -H "X-Pisces-Session-ID: $SESSION_ID" \
-  -H "X-Pisces-Flag-SkipCache: false" \
+  -H "X-Pisces-Flag-SkipCache: true" \
   -H "X-Pisces-Similarity-Threshold: 0.60" \
   -d "$JSON_PAYLOAD"

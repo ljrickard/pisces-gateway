@@ -23,28 +23,21 @@ type RequestMetadata struct {
 func ParseRequestMetadata(r *http.Request) (RequestMetadata, bool) {
 	sessionID := r.Header.Get("X-Pisces-Session-ID")
 
-	// --- NEW: Strict ULID Edge Validation ---
-	if _, err := ulid.Parse(sessionID); err != nil {
-		// If it's empty or malformed, instantly reject the request
-		return RequestMetadata{}, false
-	}
-
+	// Default flags
 	flags := FeatureState{
 		SkipCache:           false,
 		NoSession:           false,
-		SimilarityThreshold: 0.90,
+		SimilarityThreshold: 0.90, // Standard default
 		ContextHistoryLimit: 20,
 	}
 
+	// Capture flags even if sessionID is missing
 	if skip := r.Header.Get("X-Pisces-Flag-SkipCache"); skip != "" {
 		flags.SkipCache = strings.ToLower(skip) == "true"
 	}
-
-	// --- NEW: Parse the NoSession flag ---
 	if noSession := r.Header.Get("X-Pisces-Flag-NoSession"); noSession != "" {
 		flags.NoSession = strings.ToLower(noSession) == "true"
 	}
-
 	if thresholdStr := r.Header.Get("X-Pisces-Similarity-Threshold"); thresholdStr != "" {
 		parsed, err := strconv.ParseFloat(thresholdStr, 64)
 		if err == nil && parsed >= 0.0 && parsed <= 1.0 {
@@ -52,9 +45,10 @@ func ParseRequestMetadata(r *http.Request) (RequestMetadata, bool) {
 		}
 	}
 
-	if headerVal := r.Header.Get("X-Pisces-Flag-ContextHistoryLimit"); headerVal != "" {
-		if val, err := strconv.Atoi(headerVal); err == nil && val > 0 {
-			flags.ContextHistoryLimit = val
+	// Validate SessionID only if it's provided
+	if sessionID != "" {
+		if _, err := ulid.Parse(sessionID); err != nil {
+			return RequestMetadata{Flags: flags}, false // Invalid ID, but keep flags
 		}
 	}
 
