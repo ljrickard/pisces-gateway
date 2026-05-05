@@ -15,7 +15,6 @@ import (
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
 	"pisces-gateway/internal/gemini"
-	"pisces-gateway/internal/gemma"
 	"pisces-gateway/internal/intent"
 	"pisces-gateway/internal/pipeline"
 	"pisces-gateway/internal/proxy"
@@ -144,10 +143,10 @@ func main() {
 	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID,
 		"TextModel", geminiCfg.TextModel, "EmbeddingModel", geminiCfg.EmbeddingModel)
 
-	gemmaClient := gemma.NewClient(gemma.Config{
-		BaseURL: os.Getenv("GEMMA_BASE_URL"),
-		Model:   os.Getenv("GEMMA_MODEL"),
-	})
+	// gemmaClient := gemma.NewClient(gemma.Config{
+	// 	BaseURL: os.Getenv("GEMMA_BASE_URL"),
+	// 	Model:   os.Getenv("GEMMA_MODEL"),
+	// })
 
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
@@ -194,8 +193,8 @@ func main() {
 	slog.Info("✅ Downstream Frasier Bot is ALIVE.")
 
 	p := &pipeline.Pipeline{
-		Rewriter:     &rewrite.Rewriter{LLM: gemmaClient},
-		Intent:       &intent.Classifier{LLM: gemmaClient},
+		Rewriter:     &rewrite.Rewriter{LLM: geminiClient},
+		Intent:       &intent.Classifier{LLM: geminiClient},
 		Embedder:     geminiClient,
 		Sessionstore: sessionStore,
 		Querycache:   queryCache,
