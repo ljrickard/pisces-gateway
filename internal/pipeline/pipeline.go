@@ -7,9 +7,7 @@ import (
 
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
-	"pisces-gateway/internal/intent"
 	"pisces-gateway/internal/proxy"
-	"pisces-gateway/internal/rewrite"
 )
 
 type Normalizer interface {
@@ -37,8 +35,8 @@ type Embedder interface {
 
 type Pipeline struct {
 	Normalizer   Normalizer
-	Rewriter     *rewrite.GeminiRewriter
-	Intent       *intent.Classifier
+	Rewriter     Rewriter // Changed from *rewrite.GeminiRewriter
+	Intent       Intent   // Changed from *intent.Classifier
 	Embedder     Embedder
 	Querycache   *cache.QueryCache
 	Sessionstore *cache.SessionStore

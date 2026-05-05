@@ -7,10 +7,12 @@ import (
 	"strings"
 
 	"pisces-gateway/internal/gemini"
+	"pisces-gateway/internal/llm"
 )
 
 type Classifier struct {
-	LLM *gemini.Client
+	// Changed from *gemini.Client to llm.Client
+	LLM llm.Client
 }
 
 // You can use this constructor, or just initialize it directly in main.go

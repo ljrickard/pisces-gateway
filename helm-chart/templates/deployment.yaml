@@ -64,3 +64,7 @@ spec:
               value: {{ .Values.gemini.model | quote }}            
             - name: EMBEDDING_MODEL
               value: {{ .Values.gemini.embedding_model | quote }}
+            - name: GEMMA_BASE_URL
+              value: {{ .Values.gemma.base_url | quote }}
+            - name: GEMMA_MODEL
+              value: {{ .Values.gemma.model | quote }}

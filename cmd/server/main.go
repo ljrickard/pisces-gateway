@@ -15,6 +15,7 @@ import (
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
 	"pisces-gateway/internal/gemini"
+	"pisces-gateway/internal/gemma"
 	"pisces-gateway/internal/intent"
 	"pisces-gateway/internal/pipeline"
 	"pisces-gateway/internal/proxy"
@@ -143,6 +144,11 @@ func main() {
 	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID,
 		"TextModel", geminiCfg.TextModel, "EmbeddingModel", geminiCfg.EmbeddingModel)
 
+	gemmaClient := gemma.NewClient(gemma.Config{
+		BaseURL: os.Getenv("GEMMA_BASE_URL"),
+		Model:   os.Getenv("GEMMA_MODEL"),
+	})
+
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		slog.Error("REDIS_ADDR environment variable is required")
@@ -188,8 +194,8 @@ func main() {
 	slog.Info("✅ Downstream Frasier Bot is ALIVE.")
 
 	p := &pipeline.Pipeline{
-		Rewriter:     &rewrite.GeminiRewriter{LLM: geminiClient},
-		Intent:       &intent.Classifier{LLM: geminiClient},
+		Rewriter:     &rewrite.Rewriter{LLM: gemmaClient},
+		Intent:       &intent.Classifier{LLM: gemmaClient},
 		Embedder:     geminiClient,
 		Sessionstore: sessionStore,
 		Querycache:   queryCache,
@@ -229,6 +235,8 @@ func main() {
 		if requestID == "" {
 			requestID = uuid.New().String()
 		}
+
+		slog.Info("Handling /chat request", "request_id", requestID)
 
 		var req ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

@@ -3,17 +3,16 @@ package rewrite
 import (
 	"context"
 	"fmt"
+	"pisces-gateway/internal/llm"
 	"strings"
-
-	"pisces-gateway/internal/gemini"
 )
 
 // The Struct is now clean and injected with your custom client
-type GeminiRewriter struct {
-	LLM *gemini.Client
+type Rewriter struct {
+	LLM llm.Client
 }
 
-func (r *GeminiRewriter) Resolve(ctx context.Context, query string, history []string) string {
+func (r *Rewriter) Resolve(ctx context.Context, query string, history []string) string {
 	if len(history) == 0 {
 		return query
 	}

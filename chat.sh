@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # Configuration
-ENDPOINT="http://34.8.247.193/chat"
-CACHE_ENDPOINT="http://34.8.247.193/cache"
+# 35.244.212.185
+ENDPOINT="http://34.8.158.31/chat"
+CACHE_ENDPOINT="http://34.8.158.31/cache"
 
 # Check for wipe flag
 if [[ "$1" == "--wipe" ]]; then
@@ -45,9 +46,9 @@ EOF
 )
 
 # Execute the chat request
-curl -i -X POST "$ENDPOINT" \
+curl -i -v -X POST "$ENDPOINT" \
   -H "Content-Type: application/json" \
-  -H "X-Pisces-Session-ID: $SESSION_ID" \
+  -H "X-Pisces-Flag-NoSession: true" \
   -H "X-Pisces-Flag-SkipCache: true" \
   -H "X-Pisces-Similarity-Threshold: 0.60" \
   -d "$JSON_PAYLOAD"
