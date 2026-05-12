@@ -24,13 +24,13 @@ import (
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 )
 
-// ChatRequest represents the incoming JSON body from the user
+// ChatRequest represents the incoming JSON body from the user[cite: 3]
 type ChatRequest struct {
 	Message string         `json:"message"`
 	Config  map[string]any `json:"config,omitempty"`
 }
 
-// --- OpenAI Spec Structs ---
+// --- OpenAI Spec Structs ---[cite: 3]
 type OpenAIMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -63,7 +63,6 @@ type OpenAIChatResponse struct {
 	Usage   OpenAIUsage    `json:"usage"`
 }
 
-// Add these structs near your other OpenAI structs
 type OpenAIModel struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -122,12 +121,7 @@ func main() {
 		},
 	}
 
-	if geminiCfg.TextModel == "" {
-		slog.Error("❌ GEMINI_MODEL environment variable is not set")
-		os.Exit(1)
-	}
-
-	if geminiCfg.ProjectID == "" {
+	if geminiCfg.TextModel == "" || geminiCfg.ProjectID == "" {
 		slog.Error("❌ GEMINI_MODEL or GEMINI_PROJECT environment variable is not set")
 		os.Exit(1)
 	}
@@ -142,11 +136,6 @@ func main() {
 
 	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID,
 		"TextModel", geminiCfg.TextModel, "EmbeddingModel", geminiCfg.EmbeddingModel)
-
-	// gemmaClient := gemma.NewClient(gemma.Config{
-	// 	BaseURL: os.Getenv("GEMMA_BASE_URL"),
-	// 	Model:   os.Getenv("GEMMA_MODEL"),
-	// })
 
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
@@ -225,11 +214,10 @@ func main() {
 
 		metadata, valid := config.ParseRequestMetadata(r)
 		if !valid {
-			http.Error(w, "Missing, malformed, or invalid Metadata Headers (X-Pisces-Session-ID must be a valid ULID)", http.StatusBadRequest)
-			return
+			slog.Warn("Missing or invalid X-Pisces-Session-ID, defaulting to stateless mode (NoSession=true)")
+			metadata.Flags.NoSession = true
 		}
 
-		// Look for Client Request ID, generate one if missing
 		requestID := r.Header.Get("X-Client-Request-Id")
 		if requestID == "" {
 			requestID = uuid.New().String()
@@ -244,14 +232,15 @@ func main() {
 			return
 		}
 
-		// Call the Stateful Wrapper
-		answer, contexts := p.ExecuteWithSession(r.Context(), req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config)
+		// UPDATED: Receive 3 values (answer, reranked contexts, raw contexts)[cite: 4]
+		answer, contexts, rawContexts := p.ExecuteWithSession(r.Context(), req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config)
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("x-request-id", requestID) // Echo ID back
+		w.Header().Set("x-request-id", requestID)
 		json.NewEncoder(w).Encode(map[string]any{
-			"response": answer,
-			"contexts": contexts,
+			"response":     answer,
+			"contexts":     contexts,
+			"raw_contexts": rawContexts, // UPDATED: Bubble up to eval suite[cite: 3]
 		})
 	})
 
@@ -278,7 +267,6 @@ func main() {
 			return
 		}
 
-		// Look for Client Request ID, generate one if missing
 		requestID := r.Header.Get("X-Client-Request-Id")
 		if requestID == "" {
 			requestID = uuid.New().String()
@@ -291,14 +279,11 @@ func main() {
 			return
 		}
 
-		// Extract the history array and the last user message
 		var history []string
 		var lastUserMessage string
 
 		if len(req.Messages) > 0 {
 			lastUserMessage = req.Messages[len(req.Messages)-1].Content
-
-			// Build history from all prior messages (excluding the final query)
 			for i := 0; i < len(req.Messages)-1; i++ {
 				msg := req.Messages[i]
 				prefix := "User: "
@@ -312,16 +297,13 @@ func main() {
 		}
 
 		metadata, _ := config.ParseRequestMetadata(r)
-
-		// Force NoSession to true for OpenAI spec since history is provided in the payload
 		metadata.Flags.NoSession = true
 
-		// Call the Pure Pipeline directly (Bypassing Redis)
-		answer, _ := p.Execute(r.Context(), lastUserMessage, history, requestID, metadata.Flags, map[string]any{})
+		// UPDATED: Signature matching pipeline change[cite: 4]
+		answer, _, _ := p.Execute(r.Context(), lastUserMessage, history, requestID, metadata.Flags, map[string]any{})
 
-		// Format the string response back into the standard OpenAI JSON shape
 		resp := OpenAIChatResponse{
-			ID:      fmt.Sprintf("chatcmpl-%s", requestID), // Tie the trace to the OpenAI completion ID!
+			ID:      fmt.Sprintf("chatcmpl-%s", requestID),
 			Object:  "chat.completion",
 			Created: time.Now().Unix(),
 			Model:   req.Model,
@@ -343,11 +325,10 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("x-request-id", requestID) // Echo ID back
+		w.Header().Set("x-request-id", requestID)
 		json.NewEncoder(w).Encode(resp)
 	})
 
-	// Add this handler in your main() function alongside the others
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		resp := OpenAIModelsResponse{
 			Object: "list",
