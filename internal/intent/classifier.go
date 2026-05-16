@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	temperature = 0.0
+	defaultTemperature = 0.0
 )
 
 type Classifier struct {
@@ -38,7 +38,7 @@ func (c *Classifier) Determine(ctx context.Context, query string) string {
 		Query: "%s"
 		Intent:`, query)
 
-	response, err := c.LLM.GenerateText(ctx, prompt, temperature)
+	response, err := c.LLM.GenerateText(ctx, prompt, defaultTemperature)
 	if err != nil {
 		slog.Error("⚠️ Classifier LLM failed, defaulting safely to frasier domain", "trace_id", traceID, "error", err)
 		return "frasier"

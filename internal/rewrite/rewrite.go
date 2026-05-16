@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	temperature = 0.0
+	defaultTemperature = 0.0
 )
 
 type Rewriter struct {
@@ -36,7 +36,7 @@ func (r *Rewriter) Resolve(ctx context.Context, query string, history []string) 
 		
 		Rewritten Query:`, strings.Join(history, "\n"), query)
 
-	rewritten, err := r.LLM.GenerateText(ctx, prompt, temperature)
+	rewritten, err := r.LLM.GenerateText(ctx, prompt, defaultTemperature)
 	if err != nil || rewritten == "" {
 		slog.Error("⚠️ [Query Rewriter] Refomulation failed, entering fallback path", "trace_id", traceID, "error", err)
 		return query
