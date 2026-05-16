@@ -10,7 +10,14 @@ import (
 	"os"
 	"time"
 
+	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/config"
@@ -99,6 +106,16 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 
 	slog.Info("🐟 Starting Pisces API Gateway...")
+
+	tp, err := initTracer("pisces-12") // Your GCP Project ID
+	if err != nil {
+		slog.Error("❌ Failed to initialize tracing", "error", err)
+	} else {
+		slog.Info("🔭 OpenTelemetry tracing enabled via GCP Cloud Trace")
+		// Ensure all spans are flushed to GCP before the app shuts down
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+		defer tp.Shutdown(context.Background())
+	}
 
 	startupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
@@ -206,7 +223,7 @@ func main() {
 		w.Write([]byte("Gateway OK"))
 	})
 
-	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
+	chatHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -243,6 +260,8 @@ func main() {
 			"raw_contexts": rawContexts, // UPDATED: Bubble up to eval suite[cite: 3]
 		})
 	})
+
+	mux.Handle("/chat", otelhttp.NewHandler(chatHandler, "POST /chat"))
 
 	mux.HandleFunc("/cache", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -370,4 +389,28 @@ func getSecret(ctx context.Context, projectID, secretName string) (string, error
 	}
 
 	return string(result.Payload.Data), nil
+}
+
+func initTracer(projectID string) (*sdktrace.TracerProvider, error) {
+	exporter, err := texporter.New(texporter.WithProjectID(projectID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCP trace exporter: %w", err)
+	}
+
+	// NEW: Use resource.New instead of resource.Merge to avoid schema URL conflicts!
+	res, err := resource.New(context.Background(),
+		resource.WithAttributes(
+			semconv.ServiceName("frasier-bot"),
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(tp)
+	return tp, nil
 }

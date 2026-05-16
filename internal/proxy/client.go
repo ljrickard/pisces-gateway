@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // FrasierClient handles communication with the downstream bot
@@ -16,7 +18,10 @@ type FrasierClient struct {
 }
 
 func NewFrasierClient(url string) (*FrasierClient, error) {
-	client := &http.Client{Timeout: 65 * time.Second}
+	client := &http.Client{
+		Transport: otelhttp.NewTransport(http.DefaultTransport),
+		Timeout:   65 * time.Second,
+	}
 
 	// Perform the health check before returning
 	resp, err := client.Get(fmt.Sprintf("%s/health", url))
@@ -47,6 +52,7 @@ func (c *FrasierClient) ForwardChat(ctx context.Context, payload any) (map[strin
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
