@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 
+	"pisces-gateway/tracing"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -19,13 +21,14 @@ type SessionStore struct {
 func NewSessionStore(client *redis.Client, cfg RetryConfig) *SessionStore {
 	return &SessionStore{client: client, cfg: cfg}
 }
+
 func (r *SessionStore) GetSession(ctx context.Context, sessionID string, limit int) ([]string, error) {
+	traceID := tracing.GetTraceID(ctx)
 	fullKey := PrefixSession + sessionID
-	slog.Debug("📜 Fetching Session History", "session_id", sessionID, "limit", limit)
+	slog.Debug("📜 Fetching Session History", "session_id", sessionID, "limit", limit, "trace_id", traceID)
 
 	var res []string
 
-	// Wrap the call in our robust retry logic!
 	err := executeWithRetry(ctx, r.cfg, func(opCtx context.Context) error {
 		var innerErr error
 		res, innerErr = r.client.LRange(opCtx, fullKey, 0, int64(limit-1)).Result()
@@ -33,7 +36,7 @@ func (r *SessionStore) GetSession(ctx context.Context, sessionID string, limit i
 	})
 
 	if err != nil && err != redis.Nil {
-		slog.Error("❌ Redis GetSession Error", "session_id", sessionID, "error", err)
+		slog.Error("❌ Redis GetSession Error", "session_id", sessionID, "trace_id", traceID, "error", err)
 		return nil, err
 	}
 
@@ -41,6 +44,7 @@ func (r *SessionStore) GetSession(ctx context.Context, sessionID string, limit i
 }
 
 func (r *SessionStore) SaveSession(ctx context.Context, sessionID string, message string) error {
+	traceID := tracing.GetTraceID(ctx)
 	fullKey := PrefixSession + sessionID
 
 	err := executeWithRetry(ctx, r.cfg, func(opCtx context.Context) error {
@@ -53,10 +57,9 @@ func (r *SessionStore) SaveSession(ctx context.Context, sessionID string, messag
 	})
 
 	if err != nil {
-		// Graceful degradation: Log it, but don't crash the user's request
-		slog.Error("❌ Redis SaveSession Error (Degraded)", "session_id", sessionID, "error", err)
+		slog.Error("❌ Redis SaveSession Error (Degraded)", "session_id", sessionID, "trace_id", traceID, "error", err)
 	} else {
-		slog.Debug("📝 Saved to Session", "session_id", sessionID)
+		slog.Debug("📝 Saved to Session Store", "session_id", sessionID, "trace_id", traceID)
 	}
 
 	return err

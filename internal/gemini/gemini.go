@@ -3,10 +3,12 @@ package gemini
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"strings"
 	"time"
+
+	"pisces-gateway/tracing"
 
 	"google.golang.org/genai"
 )
@@ -16,7 +18,6 @@ type RetryConfig struct {
 	BaseDelay  time.Duration
 }
 
-// 1. Config struct updated with APIKey
 type Config struct {
 	ProjectID      string
 	Location       string
@@ -36,12 +37,10 @@ type Client struct {
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	clientConfig := &genai.ClientConfig{}
 
-	// If API Key is provided, use it and route to the AI Studio Backend
 	if cfg.APIKey != "" {
 		clientConfig.APIKey = cfg.APIKey
 		clientConfig.Backend = genai.BackendGeminiAPI
 	} else {
-		// Fallback to federated identity (Vertex AI) if no key is present
 		clientConfig.Project = cfg.ProjectID
 		clientConfig.Location = cfg.Location
 		clientConfig.Backend = genai.BackendVertexAI
@@ -52,14 +51,12 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("failed to initialize genai client: %w", err)
 	}
 
-	// Test the Text Model
 	if cfg.TextModel != "" {
 		if _, err = c.Models.Get(ctx, cfg.TextModel, nil); err != nil {
 			return nil, fmt.Errorf("connection test failed for text model %s: %w", cfg.TextModel, err)
 		}
 	}
 
-	// Test the Embedding Model
 	if cfg.EmbeddingModel != "" {
 		if _, err = c.Models.Get(ctx, cfg.EmbeddingModel, nil); err != nil {
 			return nil, fmt.Errorf("connection test failed for embedding model %s: %w", cfg.EmbeddingModel, err)
@@ -78,11 +75,12 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	}, nil
 }
 
-// 2. The Text Generator
 func (c *Client) GenerateText(ctx context.Context, prompt string) (string, error) {
+	traceID := tracing.GetTraceID(ctx)
 	temperature := float32(0.2)
 
-	// Note how we use the generic retry wrapper here
+	slog.Debug("🤖 [Gemini LLM] Dispatching text generation request content", "model", c.textModel, "trace_id", traceID)
+
 	resp, err := executeWithRetry(ctx, c.retryCfg, func() (*genai.GenerateContentResponse, error) {
 		return c.rawClient.Models.GenerateContent(ctx, c.textModel, genai.Text(prompt), &genai.GenerateContentConfig{
 			Temperature: &temperature,
@@ -90,6 +88,7 @@ func (c *Client) GenerateText(ctx context.Context, prompt string) (string, error
 	})
 
 	if err != nil {
+		slog.Error("❌ [Gemini LLM] Text generation request failed out completely", "trace_id", traceID, "error", err)
 		return "", fmt.Errorf("failed to generate content: %w", err)
 	}
 
@@ -101,25 +100,25 @@ func (c *Client) GenerateText(ctx context.Context, prompt string) (string, error
 	return answer, nil
 }
 
-// 3. The Embedding Generator (Satisfies the Embedder Interface)
 func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	traceID := tracing.GetTraceID(ctx)
 	if c.embeddingModel == "" {
 		return nil, fmt.Errorf("embedding model is not configured")
 	}
 
-	// Create the configuration to truncate the model output
-	// to match your existing PostgreSQL 768-dimension schema
 	outputDim := int32(768)
 	embedConfig := &genai.EmbedContentConfig{
 		OutputDimensionality: &outputDim,
 	}
 
-	// Note that we pass embedConfig instead of nil here!
+	slog.Debug("🧮 [Gemini Embedder] Requesting matrix token coordinates", "model", c.embeddingModel, "trace_id", traceID)
+
 	resp, err := executeWithRetry(ctx, c.retryCfg, func() (*genai.EmbedContentResponse, error) {
 		return c.rawClient.Models.EmbedContent(ctx, c.embeddingModel, genai.Text(text), embedConfig)
 	})
 
 	if err != nil {
+		slog.Error("❌ [Gemini Embedder] Matrix token coordinate call failed", "trace_id", traceID, "error", err)
 		return nil, fmt.Errorf("failed to generate embedding: %w", err)
 	}
 
@@ -130,9 +129,9 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 	return resp.Embeddings[0].Values, nil
 }
 
-// 4. The Generic Retry Wrapper [T any]
 func executeWithRetry[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) (T, error) {
-	var zero T // Go needs this to return an empty value on total failure
+	var zero T
+	traceID := tracing.GetTraceID(ctx)
 
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
 		resp, err := fn()
@@ -153,7 +152,12 @@ func executeWithRetry[T any](ctx context.Context, cfg RetryConfig, fn func() (T,
 		jitter := time.Duration(rand.Int63n(int64(delay) / 4))
 		wait := delay + jitter
 
-		log.Printf("⚠️ Rate limited (429) | retry %d/%d in %v...", attempt+1, cfg.MaxRetries, wait)
+		slog.Warn("⚠️ Google Gemini API rate limited (429), initiating transient retry backoff schedule",
+			"attempt", attempt+1,
+			"max_retries", cfg.MaxRetries,
+			"backoff_wait", wait,
+			"trace_id", traceID,
+		)
 
 		select {
 		case <-ctx.Done():

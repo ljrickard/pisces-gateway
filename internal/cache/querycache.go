@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"pisces-gateway/tracing"
+
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
@@ -20,16 +22,15 @@ const (
 type QueryCache struct {
 	client *redis.Client
 	cfg    RetryConfig
-	mu     sync.RWMutex // Add this to manage the index lifecycle
+	mu     sync.RWMutex
 }
 
 func NewQueryCache(client *redis.Client, cfg RetryConfig) *QueryCache {
 	return &QueryCache{client: client, cfg: cfg}
 }
 
-// InitializeIndex creates the RediSearch schema if it doesn't exist
 func (q *QueryCache) InitializeIndex(ctx context.Context) error {
-	// 768 is the exact dimension size for Google's text-embedding-004 model
+	traceID := tracing.GetTraceID(ctx)
 	err := q.client.Do(ctx,
 		"FT.CREATE", "idx:cache",
 		"ON", "HASH", "PREFIX", "1", PrefixCache,
@@ -41,26 +42,25 @@ func (q *QueryCache) InitializeIndex(ctx context.Context) error {
 		"DISTANCE_METRIC", "COSINE",
 	).Err()
 
-	// It's safe to run this on every boot. If the index is already there, it throws a harmless error.
 	if err != nil && err.Error() != "Index already exists" {
-		slog.Error("⚠️ Failed to create Redis Vector Index", "error", err)
+		slog.Error("⚠️ Failed to create Redis Vector Index", "trace_id", traceID, "error", err)
 		return err
 	}
-	slog.Info("🔍 Redis Vector Index initialized (or already exists)")
+	slog.Info("🔍 Redis Vector Index initialized (or already exists)", "trace_id", traceID)
 	return nil
 }
+
 func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, threshold float64) (string, bool) {
-	// Suspect #2: Dimension Mismatch. RediSearch silently drops vectors that don't match the schema DIM.
+	traceID := tracing.GetTraceID(ctx)
+
 	if len(queryVector) != 768 {
-		slog.Error("❌ [Cache] Vector dimension mismatch! RediSearch will ignore this.", "expected", 768, "got", len(queryVector))
+		slog.Error("❌ [Cache] Vector dimension mismatch! RediSearch will ignore this.", "expected", 768, "got", len(queryVector), "trace_id", traceID)
 		return "", false
 	}
 
 	vectorBytes := float32ToByte(queryVector)
 	searchQuery := "*=>[KNN 1 @embedding $vec AS distance]"
 
-	// 🚨 Fix 1: Explicitly define results as a slice of interfaces
-	// 1. Use .Result() so go-redis just gives us whatever raw interface it receives
 	var res interface{}
 	err := executeWithRetry(ctx, q.cfg, func(opCtx context.Context) error {
 		var innerErr error
@@ -74,7 +74,7 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, thresh
 	})
 
 	if err != nil {
-		slog.Error("❌ Redis Vector Search Error", "error", err)
+		slog.Error("❌ Redis Vector Search Error", "trace_id", traceID, "error", err)
 		return "", false
 	}
 
@@ -82,18 +82,14 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, thresh
 	var distance float64
 	var totalResults int64
 
-	// 2. Safely parse the response based on the Protocol format (RESP2 vs RESP3)
 	switch v := res.(type) {
-
 	case []interface{}:
-		// --- RESP2 PARSING (Older Flat Array Format) ---
-		// local Redis 5 container (RESP2)
 		if len(v) == 0 {
 			return "", false
 		}
 		totalResults = v[0].(int64)
 		if totalResults == 0 {
-			slog.Info("💾 [Cache Miss] Index active, 0 matches found (RESP2)")
+			slog.Info("💾 [Cache Miss] Index active, 0 matches found (RESP2)", "trace_id", traceID)
 			return "", false
 		}
 		if len(v) >= 3 {
@@ -111,10 +107,6 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, thresh
 		}
 
 	case map[interface{}]interface{}:
-		// Google Cloud Memorystore Redis 7 instance (RESP3)
-		// --- RESP3 PARSING (Newer Map/Dictionary Format) ---
-
-		// Safely extract total_results
 		if total, ok := v["total_results"].(int64); ok {
 			totalResults = total
 		} else if total, ok := v["total_results"].(int); ok {
@@ -122,15 +114,12 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, thresh
 		}
 
 		if totalResults == 0 {
-			slog.Info("💾 [Cache Miss] Index active, 0 matches found (RESP3)")
+			slog.Info("💾 [Cache Miss] Index active, 0 matches found (RESP3)", "trace_id", traceID)
 			return "", false
 		}
 
-		// Extract the results array
 		if resultsArr, ok := v["results"].([]interface{}); ok && len(resultsArr) > 0 {
-			// Get the first document
 			if doc, ok := resultsArr[0].(map[interface{}]interface{}); ok {
-				// In RESP3, the return fields are nested inside "extra_attributes"
 				fields := doc
 				if extra, hasExtra := doc["extra_attributes"].(map[interface{}]interface{}); hasExtra {
 					fields = extra
@@ -146,11 +135,10 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, thresh
 		}
 
 	default:
-		slog.Error("❌ [Cache] Unrecognized Redis response type", "type", fmt.Sprintf("%T", res))
+		slog.Error("❌ [Cache] Unrecognized Redis response type", "type", fmt.Sprintf("%T", res), "trace_id", traceID)
 		return "", false
 	}
 
-	// 3. Precision Math
 	similarity := 1.0 - distance
 	margin := similarity - threshold
 
@@ -158,51 +146,48 @@ func (q *QueryCache) GetCache(ctx context.Context, queryVector []float32, thresh
 		"threshold", fmt.Sprintf("%.4f", threshold),
 		"similarity", fmt.Sprintf("%.4f", similarity),
 		"margin", fmt.Sprintf("%+.4f", margin),
+		"trace_id", traceID,
 	)
 
 	if similarity >= threshold {
-		slog.Info("🎯 [Cache Hit] Success!")
+		slog.Info("🎯 [Cache Hit] Success!", "trace_id", traceID)
 		return answer, true
 	}
 
-	slog.Info("📉 [Cache Miss] Score too low")
+	slog.Info("📉 [Cache Miss] Score too low", "trace_id", traceID)
 	return "", false
 }
 
-// SetCache stores the query, answer, and vector as a Redis Hash
 func (q *QueryCache) SetCache(ctx context.Context, query string, answer string, vector []float32, ttl time.Duration) error {
-	// Generate a unique key for this specific cache entry
+	traceID := tracing.GetTraceID(ctx)
 	key := PrefixCache + uuid.New().String()
 	vectorBytes := float32ToByte(vector)
 
 	err := executeWithRetry(ctx, q.cfg, func(opCtx context.Context) error {
 		pipe := q.client.Pipeline()
-		// Store as a Redis Hash
 		pipe.HSet(opCtx, key, map[string]interface{}{
 			"query":     query,
 			"answer":    answer,
 			"embedding": vectorBytes,
 		})
-		// Set the expiration
 		pipe.Expire(opCtx, key, ttl)
 		_, innerErr := pipe.Exec(opCtx)
 		return innerErr
 	})
 
 	if err != nil {
-		slog.Error("❌ Redis Vector Set Error (Degraded)", "error", err)
+		slog.Error("❌ Redis Vector Set Error (Degraded)", "trace_id", traceID, "error", err)
 		return err
 	}
 
-	slog.Debug("💾 Semantic Cache Stored", "key", key)
+	slog.Debug("💾 Semantic Cache Stored", "key", key, "trace_id", traceID)
 	return nil
 }
 
 func (q *QueryCache) FlushCache(ctx context.Context) error {
-	slog.Warn("🧹 [Cache Management] Strategic Wipe Initiated...")
+	traceID := tracing.GetTraceID(ctx)
+	slog.Warn("🧹 [Cache Management] Strategic Wipe Initiated...", "trace_id", traceID)
 
-	// 1. Delete all keys with our prefix, but NOT the index schema itself
-	// This keeps the 'idx:cache' definition alive so GetCache never throws "No such index"
 	script := `
         local keys = redis.call('keys', ARGV[1])
         for i,k in ipairs(keys) do
@@ -212,15 +197,14 @@ func (q *QueryCache) FlushCache(ctx context.Context) error {
     `
 	err := q.client.Eval(ctx, script, []string{}, PrefixCache+"*").Err()
 	if err != nil {
-		// Fallback: If script fails, we do the nuclear option but immediately re-index
+		slog.Error("⚠️ Cache script wipe failed, using fallback FlushDB pipeline", "trace_id", traceID, "error", err)
 		q.client.FlushDB(ctx)
 		q.InitializeIndex(ctx)
 	}
 
-	// 2. Also wipe the session history (different prefix)
 	q.client.Eval(ctx, script, []string{}, "session:v1:*")
 
-	slog.Info("✅ [Cache Management] Strategic wipe complete. Schema preserved.")
+	slog.Info("✅ [Cache Management] Strategic wipe complete. Schema preserved.", "trace_id", traceID)
 	return nil
 }
 

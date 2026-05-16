@@ -26,18 +26,19 @@ import (
 	"pisces-gateway/internal/pipeline"
 	"pisces-gateway/internal/proxy"
 	"pisces-gateway/internal/rewrite"
+	"pisces-gateway/tracing"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 )
 
-// ChatRequest represents the incoming JSON body from the user[cite: 3]
+// ChatRequest represents the incoming JSON body from the user
 type ChatRequest struct {
 	Message string         `json:"message"`
 	Config  map[string]any `json:"config,omitempty"`
 }
 
-// --- OpenAI Spec Structs ---[cite: 3]
+// --- OpenAI Spec Structs ---
 type OpenAIMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -112,12 +113,12 @@ func main() {
 		slog.Error("❌ Failed to initialize tracing", "error", err)
 	} else {
 		slog.Info("🔭 OpenTelemetry tracing enabled via GCP Cloud Trace")
-		// Ensure all spans are flushed to GCP before the app shuts down
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 		defer tp.Shutdown(context.Background())
 	}
 
 	startupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	projectID := "pisces-12"
 	secretName := "gemini-api-key"
@@ -143,7 +144,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("✅ Using Gemini config", slog.Any("geminiCfg", geminiCfg))
+	slog.Info("Using Gemini configuration", slog.Any("config", map[string]any{
+		"project_id":      geminiCfg.ProjectID,
+		"location":        geminiCfg.Location,
+		"text_model":      geminiCfg.TextModel,
+		"embedding_model": geminiCfg.EmbeddingModel,
+	}))
 
 	geminiClient, err := gemini.NewClient(startupCtx, geminiCfg)
 	if err != nil {
@@ -152,7 +158,7 @@ func main() {
 	}
 
 	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID,
-		"TextModel", geminiCfg.TextModel, "EmbeddingModel", geminiCfg.EmbeddingModel)
+		"text_model", geminiCfg.TextModel, "embedding_model", geminiCfg.EmbeddingModel)
 
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
@@ -165,8 +171,6 @@ func main() {
 		slog.Error("FRASIER_BOT_URL environment variable is required")
 		os.Exit(1)
 	}
-
-	defer cancel()
 
 	rawRedis, err := cache.NewRedisConnection(startupCtx, os.Getenv("REDIS_ADDR"))
 	if err != nil {
@@ -224,14 +228,19 @@ func main() {
 	})
 
 	chatHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		traceID := tracing.GetTraceID(ctx)
+		w.Header().Set("X-Trace-Id", traceID)
+
 		if r.Method != http.MethodPost {
+			slog.Warn("Method not allowed on /chat", "method", r.Method, "trace_id", traceID)
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
 		metadata, valid := config.ParseRequestMetadata(r)
 		if !valid {
-			slog.Warn("Missing or invalid X-Pisces-Session-ID, defaulting to stateless mode (NoSession=true)")
+			slog.Warn("Missing or invalid X-Pisces-Session-ID, defaulting to stateless mode (NoSession=true)", "trace_id", traceID)
 			metadata.Flags.NoSession = true
 		}
 
@@ -240,37 +249,39 @@ func main() {
 			requestID = uuid.New().String()
 		}
 
-		slog.Info("Handling /chat request", "request_id", requestID)
-
 		var req ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Warn("Malformed request body", "request_id", requestID, "error", err)
+			slog.Warn("Malformed request body", "request_id", requestID, "trace_id", traceID, "error", err)
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
 
-		// UPDATED: Receive 3 values (answer, reranked contexts, raw contexts)[cite: 4]
-		answer, contexts, rawContexts := p.ExecuteWithSession(r.Context(), req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config)
+		answer, contexts, rawContexts := p.ExecuteWithSession(ctx, req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("x-request-id", requestID)
 		json.NewEncoder(w).Encode(map[string]any{
 			"response":     answer,
 			"contexts":     contexts,
-			"raw_contexts": rawContexts, // UPDATED: Bubble up to eval suite[cite: 3]
+			"raw_contexts": rawContexts,
+			"trace_id":     traceID,
 		})
 	})
 
 	mux.Handle("/chat", otelhttp.NewHandler(chatHandler, "POST /chat"))
 
 	mux.HandleFunc("/cache", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		traceID := tracing.GetTraceID(ctx)
+
 		if r.Method != http.MethodDelete {
+			slog.Warn("Method not allowed on /cache", "method", r.Method, "trace_id", traceID)
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		if err := queryCache.FlushCache(r.Context()); err != nil {
-			slog.Error("❌ Failed to flush Redis cache via API", "error", err)
+		if err := queryCache.FlushCache(ctx); err != nil {
+			slog.Error("❌ Failed to flush Redis cache via API", "trace_id", traceID, "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -281,7 +292,11 @@ func main() {
 	})
 
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		traceID := tracing.GetTraceID(ctx)
+
 		if r.Method != http.MethodPost {
+			slog.Warn("Method not allowed on /v1/chat/completions", "method", r.Method, "trace_id", traceID)
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -293,7 +308,7 @@ func main() {
 
 		var req OpenAIChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Warn("Malformed OpenAI request body", "request_id", requestID, "error", err)
+			slog.Warn("Malformed OpenAI request body", "request_id", requestID, "trace_id", traceID, "error", err)
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
@@ -318,8 +333,7 @@ func main() {
 		metadata, _ := config.ParseRequestMetadata(r)
 		metadata.Flags.NoSession = true
 
-		// UPDATED: Signature matching pipeline change[cite: 4]
-		answer, _, _ := p.Execute(r.Context(), lastUserMessage, history, requestID, metadata.Flags, map[string]any{})
+		answer, _, _ := p.Execute(ctx, lastUserMessage, history, requestID, metadata.Flags, map[string]any{})
 
 		resp := OpenAIChatResponse{
 			ID:      fmt.Sprintf("chatcmpl-%s", requestID),
@@ -345,6 +359,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("x-request-id", requestID)
+		w.Header().Set("X-Trace-Id", traceID)
 		json.NewEncoder(w).Encode(resp)
 	})
 
@@ -397,10 +412,9 @@ func initTracer(projectID string) (*sdktrace.TracerProvider, error) {
 		return nil, fmt.Errorf("failed to create GCP trace exporter: %w", err)
 	}
 
-	// NEW: Use resource.New instead of resource.Merge to avoid schema URL conflicts!
 	res, err := resource.New(context.Background(),
 		resource.WithAttributes(
-			semconv.ServiceName("frasier-bot"),
+			semconv.ServiceName("pisces-gateway"),
 		),
 	)
 	if err != nil {
