@@ -34,6 +34,10 @@ type Client struct {
 	retryCfg       RetryConfig
 }
 
+type GenerateConfig struct {
+	Temperature *float32
+}
+
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	clientConfig := &genai.ClientConfig{}
 
@@ -75,9 +79,8 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	}, nil
 }
 
-func (c *Client) GenerateText(ctx context.Context, prompt string) (string, error) {
+func (c *Client) GenerateText(ctx context.Context, prompt string, temperature float32) (string, error) {
 	traceID := tracing.GetTraceID(ctx)
-	temperature := float32(0.2)
 
 	slog.Debug("🤖 [Gemini LLM] Dispatching text generation request content", "model", c.textModel, "trace_id", traceID)
 

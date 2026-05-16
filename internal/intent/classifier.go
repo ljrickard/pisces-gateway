@@ -11,6 +11,10 @@ import (
 	"pisces-gateway/tracing"
 )
 
+const (
+	temperature = 0.0
+)
+
 type Classifier struct {
 	LLM llm.Client
 }
@@ -34,7 +38,7 @@ func (c *Classifier) Determine(ctx context.Context, query string) string {
 		Query: "%s"
 		Intent:`, query)
 
-	response, err := c.LLM.GenerateText(ctx, prompt)
+	response, err := c.LLM.GenerateText(ctx, prompt, temperature)
 	if err != nil {
 		slog.Error("⚠️ Classifier LLM failed, defaulting safely to frasier domain", "trace_id", traceID, "error", err)
 		return "frasier"
