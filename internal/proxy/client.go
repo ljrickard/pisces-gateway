@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -53,19 +54,18 @@ func (c *FrasierClient) ForwardChat(ctx context.Context, payload any) (map[strin
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(ctx)
 
-	slog.Debug("📞 [Proxy Outbound] Forwarding network payload across distributed cluster boundary", "url", c.BaseURL+"/chat", "trace_id", traceID)
+	slog.Debug("📞 [Proxy Outbound] Forwarding blocking network payload across cluster boundary", "url", c.BaseURL+"/chat", "trace_id", traceID)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		slog.Error("❌ [Proxy Outbound] Failed to bridge network call into downstream microservice", "trace_id", traceID, "error", err)
+		slog.Error("❌ [Proxy Outbound] Failed to bridge blocking call into downstream microservice", "trace_id", traceID, "error", err)
 		return nil, fmt.Errorf("failed to reach frasier bot: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Error("❌ [Proxy Outbound] Downstream cluster responded with unhealthy status code", "status_code", resp.StatusCode, "trace_id", traceID)
+		slog.Error("❌ [Proxy Outbound] Downstream service responded with unhealthy status code", "status_code", resp.StatusCode, "trace_id", traceID)
 		return nil, fmt.Errorf("downstream service returned HTTP %d", resp.StatusCode)
 	}
 
@@ -76,4 +76,36 @@ func (c *FrasierClient) ForwardChat(ctx context.Context, payload any) (map[strin
 	}
 
 	return result, nil
+}
+
+// ForwardChatStream executes an outbound request to the bot's stream route, passing back the raw socket body for line processing.
+func (c *FrasierClient) ForwardChatStream(ctx context.Context, payload any) (io.ReadCloser, error) {
+	traceID := tracing.GetTraceID(ctx)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	// Passing context ensures client disconnect automatically breaks the outbound request pipeline
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/chat/stream", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	slog.Debug("Streaming proxy channel connection established", "url", c.BaseURL+"/chat/stream", "trace_id", traceID)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		slog.Error("Failed to initialize outbound streaming connection channel pipeline", "trace_id", traceID, "error", err)
+		return nil, fmt.Errorf("failed to reach frasier bot stream route: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		slog.Error("Downstream bot rejected chunked streaming execution request processing", "status_code", resp.StatusCode, "trace_id", traceID)
+		return nil, fmt.Errorf("downstream streaming route returned HTTP %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }

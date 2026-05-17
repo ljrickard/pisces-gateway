@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
@@ -32,10 +34,10 @@ import (
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 )
 
-// ChatRequest represents the incoming JSON body from the user
 type ChatRequest struct {
 	Message string         `json:"message"`
 	Config  map[string]any `json:"config,omitempty"`
+	Stream  bool           `json:"stream,omitempty"`
 }
 
 // --- OpenAI Spec Structs ---
@@ -54,6 +56,25 @@ type OpenAIChoice struct {
 	Index        int           `json:"index"`
 	Message      OpenAIMessage `json:"message"`
 	FinishReason string        `json:"finish_reason"`
+}
+
+type OpenAIStreamDelta struct {
+	Content string `json:"content,omitempty"`
+	Role    string `json:"role,omitempty"`
+}
+
+type OpenAIStreamChoice struct {
+	Index        int               `json:"index"`
+	Delta        OpenAIStreamDelta `json:"delta"`
+	FinishReason *string           `json:"finish_reason"`
+}
+
+type OpenAIStreamResponse struct {
+	ID      string               `json:"id"`
+	Object  string               `json:"object"`
+	Created int64                `json:"created"`
+	Model   string               `json:"model"`
+	Choices []OpenAIStreamChoice `json:"choices"`
 }
 
 type OpenAIUsage struct {
@@ -83,20 +104,83 @@ type OpenAIModelsResponse struct {
 	Data   []OpenAIModel `json:"data"`
 }
 
-// ---------------------------
+func handleOpenAIStream(w http.ResponseWriter, r *http.Request, frasierClient *proxy.FrasierClient, modelName string, lastUserMessage string, requestID string, traceID string) {
+	ctx := r.Context()
 
-func checkBotHealth(botURL string) error {
-	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("%s/health", botURL))
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		slog.Error("❌ [OpenAI Stream] Streaming unsupported by response socket writer", "trace_id", traceID)
+		http.Error(w, "Streaming Unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	botPayload := map[string]any{
+		"query":      lastUserMessage,
+		"request_id": requestID,
+	}
+
+	streamBody, err := frasierClient.ForwardChatStream(ctx, botPayload)
 	if err != nil {
-		return fmt.Errorf("network error reaching bot: %w", err)
+		slog.Error("❌ [OpenAI Stream] Downstream route unreachable", "trace_id", traceID, "error", err)
+		http.Error(w, "Downstream stream unreachable", http.StatusBadGateway)
+		return
 	}
-	defer resp.Body.Close()
+	defer streamBody.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bot returned non-200 status: %d", resp.StatusCode)
+	var lastEvent string
+	scanner := bufio.NewScanner(streamBody)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "event: ") {
+			lastEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+
+		if strings.HasPrefix(line, "data: ") {
+			dataContent := strings.TrimPrefix(line, "data: ")
+
+			if lastEvent == "metadata" {
+				lastEvent = ""
+				continue
+			}
+
+			if dataContent == "[DONE]" {
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				break
+			}
+
+			openaiDelta := OpenAIStreamResponse{
+				ID:      fmt.Sprintf("chatcmpl-%s", requestID),
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   modelName,
+				Choices: []OpenAIStreamChoice{
+					{
+						Index: 0,
+						Delta: OpenAIStreamDelta{
+							Content: dataContent,
+						},
+						FinishReason: nil,
+					},
+				},
+			}
+			blob, _ := json.Marshal(openaiDelta)
+			fmt.Fprintf(w, "data: %s\n\n", string(blob))
+			flusher.Flush()
+
+			lastEvent = ""
+		}
 	}
-	return nil
+
+	if err := scanner.Err(); err != nil {
+		slog.Error("⚠️ [OpenAI Stream] Interruption translating downstream context wire chunks", "trace_id", traceID, "error", err)
+	}
 }
 
 func main() {
@@ -108,7 +192,7 @@ func main() {
 
 	slog.Info("🐟 Starting Pisces API Gateway...")
 
-	tp, err := initTracer("pisces-12") // Your GCP Project ID
+	tp, err := initTracer("pisces-12")
 	if err != nil {
 		slog.Error("❌ Failed to initialize tracing", "error", err)
 	} else {
@@ -144,21 +228,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("Using Gemini configuration", slog.Any("config", map[string]any{
-		"project_id":      geminiCfg.ProjectID,
-		"location":        geminiCfg.Location,
-		"text_model":      geminiCfg.TextModel,
-		"embedding_model": geminiCfg.EmbeddingModel,
-	}))
-
 	geminiClient, err := gemini.NewClient(startupCtx, geminiCfg)
 	if err != nil {
 		slog.Error("❌ Critical failure: Gemini unreachable", "error", err)
 		os.Exit(1)
 	}
-
-	slog.Info("🧠 Gemini Client established and verified", "project", geminiCfg.ProjectID,
-		"text_model", geminiCfg.TextModel, "embedding_model", geminiCfg.EmbeddingModel)
 
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
@@ -172,7 +246,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rawRedis, err := cache.NewRedisConnection(startupCtx, os.Getenv("REDIS_ADDR"))
+	rawRedis, err := cache.NewRedisConnection(startupCtx, redisAddr)
 	if err != nil {
 		slog.Error("❌ Failed to connect to Redis", "error", err)
 		os.Exit(1)
@@ -182,11 +256,7 @@ func main() {
 		Timeout:    50 * time.Millisecond,
 		MaxRetries: 0,
 	})
-	err = queryCache.InitializeIndex(startupCtx)
-	if err != nil {
-		slog.Error("❌ Query Cache Failed to Initialize Index", "error", err)
-		os.Exit(1)
-	}
+	_ = queryCache.InitializeIndex(startupCtx)
 
 	sessionStore := cache.NewSessionStore(rawRedis, cache.RetryConfig{
 		Timeout:    100 * time.Millisecond,
@@ -197,10 +267,10 @@ func main() {
 	slog.Info("🔗 Connecting to downstream Frasier Bot...", "url", frasierURL)
 	frasierClient, err := proxy.NewFrasierClient(frasierURL)
 	if err != nil {
-		slog.Error("❌ Downstream Frasier Bot is unhealthy or unreachable", "error", err)
+		slog.Error("❌ Critical failure: Downstream Frasier Bot is completely unreachable over network socket mesh", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("✅ Downstream Frasier Bot is ALIVE.")
+	slog.Info("✅ Downstream Frasier Bot link verified and active.")
 
 	p := &pipeline.Pipeline{
 		Rewriter:     &rewrite.Rewriter{LLM: geminiClient},
@@ -227,49 +297,6 @@ func main() {
 		w.Write([]byte("Gateway OK"))
 	})
 
-	chatHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		traceID := tracing.GetTraceID(ctx)
-		w.Header().Set("X-Trace-Id", traceID)
-
-		if r.Method != http.MethodPost {
-			slog.Warn("Method not allowed on /chat", "method", r.Method, "trace_id", traceID)
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		metadata, valid := config.ParseRequestMetadata(r)
-		if !valid {
-			slog.Warn("Missing or invalid X-Pisces-Session-ID, defaulting to stateless mode (NoSession=true)", "trace_id", traceID)
-			metadata.Flags.NoSession = true
-		}
-
-		requestID := r.Header.Get("X-Client-Request-Id")
-		if requestID == "" {
-			requestID = uuid.New().String()
-		}
-
-		var req ChatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Warn("Malformed request body", "request_id", requestID, "trace_id", traceID, "error", err)
-			http.Error(w, "Bad Request", http.StatusBadRequest)
-			return
-		}
-
-		answer, contexts, rawContexts := p.ExecuteWithSession(ctx, req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("x-request-id", requestID)
-		json.NewEncoder(w).Encode(map[string]any{
-			"response":     answer,
-			"contexts":     contexts,
-			"raw_contexts": rawContexts,
-			"trace_id":     traceID,
-		})
-	})
-
-	mux.Handle("/chat", otelhttp.NewHandler(chatHandler, "POST /chat"))
-
 	mux.HandleFunc("/cache", func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		traceID := tracing.GetTraceID(ctx)
@@ -291,12 +318,85 @@ func main() {
 		w.Write([]byte(`{"status": "success", "message": "Redis cache completely wiped"}`))
 	})
 
+	chatHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		traceID := tracing.GetTraceID(ctx)
+		w.Header().Set("X-Trace-Id", traceID)
+
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		requestID := r.Header.Get("X-Client-Request-Id")
+		if requestID == "" {
+			requestID = uuid.New().String()
+		}
+
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+
+		metadata, valid := config.ParseRequestMetadata(r)
+		if !valid {
+			metadata.Flags.NoSession = true
+		}
+
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			flusher, _ := w.(http.Flusher)
+
+			// Inline status helper helper to easily pump milestones across the wire
+			sendSSEStatus := func(msg string) {
+				fmt.Fprintf(w, "event: status\ndata: %s\n\n", msg)
+				flusher.Flush()
+			}
+
+			// Hand execution straight into the pipeline! Your pipeline logs will now fire perfectly!
+			streamBody, err := p.ExecuteStreamWithSession(ctx, req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config, sendSSEStatus)
+			if err != nil {
+				slog.Error("❌ [Pipeline Stream] Execution aborted via runtime crash", "trace_id", traceID, "error", err)
+				return
+			}
+			defer streamBody.Close()
+
+			// Forward the downstream text tokens verbatim as they materialize
+			scanner := bufio.NewScanner(streamBody)
+			for scanner.Scan() {
+				line := scanner.Text()
+				fmt.Fprintf(w, "%s\n", line)
+				if line == "" {
+					flusher.Flush()
+				}
+			}
+			return
+		}
+
+		// Standard, non-streaming blocking execution path remains untouched
+		answer, contexts, rawContexts := p.ExecuteWithSession(ctx, req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-request-id", requestID)
+		json.NewEncoder(w).Encode(map[string]any{
+			"response":     answer,
+			"contexts":     contexts,
+			"raw_contexts": rawContexts,
+			"trace_id":     traceID,
+		})
+	})
+
+	mux.Handle("/chat", otelhttp.NewHandler(chatHandler, "POST /chat"))
+
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		traceID := tracing.GetTraceID(ctx)
+		w.Header().Set("X-Trace-Id", traceID)
 
 		if r.Method != http.MethodPost {
-			slog.Warn("Method not allowed on /v1/chat/completions", "method", r.Method, "trace_id", traceID)
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -313,11 +413,18 @@ func main() {
 			return
 		}
 
-		var history []string
 		var lastUserMessage string
-
 		if len(req.Messages) > 0 {
 			lastUserMessage = req.Messages[len(req.Messages)-1].Content
+		}
+
+		if req.Stream {
+			handleOpenAIStream(w, r, frasierClient, req.Model, lastUserMessage, requestID, traceID)
+			return
+		}
+
+		var history []string
+		if len(req.Messages) > 0 {
 			for i := 0; i < len(req.Messages)-1; i++ {
 				msg := req.Messages[i]
 				prefix := "User: "
@@ -350,16 +457,10 @@ func main() {
 					FinishReason: "stop",
 				},
 			},
-			Usage: OpenAIUsage{
-				PromptTokens:     0,
-				CompletionTokens: 0,
-				TotalTokens:      0,
-			},
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("x-request-id", requestID)
-		w.Header().Set("X-Trace-Id", traceID)
 		json.NewEncoder(w).Encode(resp)
 	})
 
@@ -367,12 +468,7 @@ func main() {
 		resp := OpenAIModelsResponse{
 			Object: "list",
 			Data: []OpenAIModel{
-				{
-					ID:      "pisces",
-					Object:  "model",
-					Created: time.Now().Unix(),
-					OwnedBy: "ljrickard",
-				},
+				{ID: "pisces", Object: "model", Created: time.Now().Unix(), OwnedBy: "ljrickard"},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -380,10 +476,7 @@ func main() {
 	})
 
 	slog.Info("🚀 Pisces Gateway listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
-		slog.Error("❌ Gateway server crashed", "error", err)
-		os.Exit(1)
-	}
+	_ = http.ListenAndServe(":8080", mux)
 }
 
 func getSecret(ctx context.Context, projectID, secretName string) (string, error) {
@@ -392,39 +485,24 @@ func getSecret(ctx context.Context, projectID, secretName string) (string, error
 		return "", fmt.Errorf("failed to create Secret Manager client: %v", err)
 	}
 	defer smClient.Close()
-
 	versionPath := fmt.Sprintf("projects/%s/secrets/%s/versions/latest", projectID, secretName)
-	req := &secretmanagerpb.AccessSecretVersionRequest{
-		Name: versionPath,
-	}
-
-	result, err := smClient.AccessSecretVersion(ctx, req)
+	result, err := smClient.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: versionPath})
 	if err != nil {
-		return "", fmt.Errorf("failed to access secret version: %v", err)
+		return "", err
 	}
-
 	return string(result.Payload.Data), nil
 }
 
 func initTracer(projectID string) (*sdktrace.TracerProvider, error) {
 	exporter, err := texporter.New(texporter.WithProjectID(projectID))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCP trace exporter: %w", err)
+		return nil, err
 	}
-
-	res, err := resource.New(context.Background(),
-		resource.WithAttributes(
-			semconv.ServiceName("pisces-gateway"),
-		),
-	)
+	res, err := resource.New(context.Background(), resource.WithAttributes(semconv.ServiceName("pisces-gateway")))
 	if err != nil {
 		return nil, err
 	}
-
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-	)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(res))
 	otel.SetTracerProvider(tp)
 	return tp, nil
 }
