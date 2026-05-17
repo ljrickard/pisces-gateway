@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -350,28 +351,31 @@ func main() {
 			w.Header().Set("Connection", "keep-alive")
 			flusher, _ := w.(http.Flusher)
 
-			// Inline status helper helper to easily pump milestones across the wire
-			sendSSEStatus := func(msg string) {
+			sendGatewayStatus := func(msg string) {
 				fmt.Fprintf(w, "event: status\ndata: %s\n\n", msg)
 				flusher.Flush()
 			}
 
-			// Hand execution straight into the pipeline! Your pipeline logs will now fire perfectly!
-			streamBody, err := p.ExecuteStreamWithSession(ctx, req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config, sendSSEStatus)
+			streamBody, err := p.ExecuteStreamWithSession(ctx, req.Message, metadata.SessionID, requestID, metadata.Flags, req.Config, sendGatewayStatus)
 			if err != nil {
 				slog.Error("❌ [Pipeline Stream] Execution aborted via runtime crash", "trace_id", traceID, "error", err)
 				return
 			}
 			defer streamBody.Close()
 
-			// Forward the downstream text tokens verbatim as they materialize
-			scanner := bufio.NewScanner(streamBody)
-			for scanner.Scan() {
-				line := scanner.Text()
-				fmt.Fprintf(w, "%s\n", line)
-				if line == "" {
-					flusher.Flush()
+			// FIX: Dynamic Reader prevents large token packet drops on the gateway egress leg
+			reader := bufio.NewReader(streamBody)
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					if err == io.EOF && len(line) > 0 {
+						fmt.Fprint(w, line)
+						flusher.Flush()
+					}
+					break
 				}
+				fmt.Fprint(w, line)
+				flusher.Flush() // Flush immediately to avoid network queue lag
 			}
 			return
 		}

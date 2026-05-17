@@ -15,8 +15,6 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-// ExecuteStreamWithSession runs the exact same pre-processing middleware as blocking.go
-// and passes real-time event updates down to the UI stream socket layer.
 func (p *Pipeline) ExecuteStreamWithSession(
 	ctx context.Context,
 	rawQuery string,
@@ -151,25 +149,38 @@ func (p *Pipeline) ExecuteStreamWithSession(
 
 			var answerBuilder strings.Builder
 			var lastEventType string
-			scanner := bufio.NewScanner(streamBody)
 
-			for scanner.Scan() {
-				line := scanner.Text()
-				fmt.Fprintln(pw, line) // Stream directly to client un-mangled
+			// FIX: Swap Scanner for a dynamic Reader to lift the 64KB line limit
+			reader := bufio.NewReader(streamBody)
 
-				if strings.HasPrefix(line, "event: ") {
-					lastEventType = strings.TrimPrefix(line, "event: ")
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					// Handle any lingering trailing text before exiting at EOF
+					if err == io.EOF && len(line) > 0 {
+						fmt.Fprint(pw, line)
+					}
+					break
+				}
+				fmt.Fprint(pw, line) // Stream directly to client un-mangled
+
+				// Trim the trailing newline for internal text processing parsing checks
+				cleanLine := strings.TrimSuffix(line, "\n")
+
+				if strings.HasPrefix(cleanLine, "event: ") {
+					lastEventType = strings.TrimPrefix(cleanLine, "event: ")
 					continue
 				}
 
-				if strings.HasPrefix(line, "data: ") {
-					token := strings.TrimPrefix(line, "data: ")
-					if lastEventType != "status" && token != "[DONE]" {
+				if strings.HasPrefix(cleanLine, "data: ") {
+					token := strings.TrimPrefix(cleanLine, "data: ")
+					// Avoid caching raw metadata or done control sequences into the semantic layer
+					if lastEventType != "status" && lastEventType != "metadata" && token != "[DONE]" && !strings.HasPrefix(token, "{") {
 						answerBuilder.WriteString(token)
 					}
 				}
 
-				if line == "" {
+				if cleanLine == "" {
 					lastEventType = ""
 				}
 			}

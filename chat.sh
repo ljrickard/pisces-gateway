@@ -11,16 +11,33 @@ YELLOW='\033[1;33m'
 DIM='\033[2m'
 NC='\033[0m'
 
+# --- Temp Files & Cleanup Trap ---
+HEADER_FILE=$(mktemp)
+STATUS_FILE=$(mktemp)
+TMP_FILE=$(mktemp)
+
+# Catch Ctrl+C to cleanly assassinate the background spinner thread before exiting
+cleanup() {
+    if [ -n "$SPINNER_PID" ]; then
+        echo "STOP_SPINNER" > "$STATUS_FILE" 2>/dev/null
+        kill -9 $SPINNER_PID 2>/dev/null
+    fi
+    printf "\r\033[2K"
+    echo -e "\n${YELLOW}Session terminated by user.${NC}"
+    rm -f "$HEADER_FILE" "$STATUS_FILE" "$TMP_FILE" 2>/dev/null
+    exit 0
+}
+trap 'cleanup' SIGINT SIGTERM
+
 # --- Interactive Spinner Variables ---
 SPIN_CHARS='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-SPIN_INDEX=0
 
 print_spinner() {
     local msg="$1"
     local idx=$((SPIN_INDEX % 10))
     local char="${SPIN_CHARS:$idx:1}"
-    # \r resets to start, \033[K clears the row forward to prevent ghost letters
-    printf "\r${CYAN}[%s] %s...${NC}" "$char" "$msg"
+    # \033[2K explicitly erases the entire terminal line to completely prevent ghost text
+    printf "\r\033[2K${CYAN}[%s] %s...${NC}" "$char" "$msg"
     ((SPIN_INDEX++))
 }
 
@@ -44,7 +61,19 @@ fi
 
 MESSAGE="${POSITIONAL_ARGS[0]:-\"Why did Maris leave Niles?\"}"
 CLEAN_MESSAGE=$(echo "$MESSAGE" | tr -d '\n')
-SESSION_ID=$(uuidgen | tr -d '-' | tr '[:lower:]' '[:upper:]' | cut -c 1-26)
+
+# --- Robust Session ID Generation ---
+if command -v uuidgen &> /dev/null; then
+    SESSION_ID=$(uuidgen | tr -d '-' | tr '[:lower:]' '[:upper:]' | cut -c 1-26)
+else
+    SESSION_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | tr '[:lower:]' '[:upper:]' | cut -c 1-26)
+    if [ -z "$SESSION_ID" ]; then
+        SESSION_ID=$(date +%s%N | shasum 2>/dev/null | head -c 26 | tr '[:lower:]' '[:upper:]')
+    fi
+    if [ -z "$SESSION_ID" ]; then
+        SESSION_ID=$RANDOM$RANDOM$RANDOM
+    fi
+fi
 
 echo -e "${DIM}Session ID: $SESSION_ID${NC}"
 echo -e "${CYAN}🎙️  User:${NC} $CLEAN_MESSAGE"
@@ -55,12 +84,25 @@ JSON_PAYLOAD=$(jq -n --arg msg "$CLEAN_MESSAGE" --argjson stream "$STREAM_MODE" 
 echo -e "${GREEN}🎧 Frasier:${NC}"
 
 if [ "$STREAM_MODE" = true ]; then
-    HEADER_FILE=$(mktemp)
-    CURRENT_STATUS="Connecting to Gateway"
-    HAS_STARTED_RESPONSE=false
-    LAST_EVENT_TYPE=""
+    echo "Connecting to Gateway" > "$STATUS_FILE"
 
-    print_spinner "$CURRENT_STATUS"
+    # --- BACKGROUND SPINNER THREAD ---
+    (
+        SPIN_INDEX=0
+        while [ -f "$STATUS_FILE" ]; do
+            CURRENT_STATUS=$(cat "$STATUS_FILE")
+            if [ "$CURRENT_STATUS" == "STOP_SPINNER" ]; then
+                break
+            fi
+            print_spinner "$CURRENT_STATUS"
+            sleep 0.1
+        done
+    ) &
+    SPINNER_PID=$!
+
+    HAS_STARTED_RESPONSE=false
+    LAST_EVENT_TYPE="message"
+    IGNORE_DATA_BLOCK=false
 
     curl -s -N -D "$HEADER_FILE" -X POST "$ENDPOINT" \
       -H "Content-Type: application/json" \
@@ -69,60 +111,70 @@ if [ "$STREAM_MODE" = true ]; then
       -H "X-Pisces-Flag-SkipCache: true" \
       -d "$JSON_PAYLOAD" | while IFS= read -r raw_line; do
         
-        # CRITICAL FIX: Strip hidden network carriage returns (\r) immediately
         line="${raw_line//$'\r'/}"
 
         if [[ -z "$line" ]]; then
-            if [ "$HAS_STARTED_RESPONSE" = false ]; then
-                print_spinner "$CURRENT_STATUS"
-            fi
+            LAST_EVENT_TYPE="message"
+            IGNORE_DATA_BLOCK=false
             continue
         fi
 
-        # Track explicitly defined event frames
         if [[ "$line" =~ ^event:\ (.*) ]]; then
             LAST_EVENT_TYPE="${BASH_REMATCH[1]}"
             continue
         fi
 
-        # Extract payload from standard data rows
         if [[ "$line" =~ ^data:\ (.*) ]]; then
             token="${BASH_REMATCH[1]}"
 
             if [[ "$token" == "[DONE]" ]]; then
-                echo ""
+                echo -e "\n"
                 break
             fi
 
-            # Handle status event changes cleanly
             if [[ "$LAST_EVENT_TYPE" == "status" ]]; then
-                CURRENT_STATUS="$token"
-                print_spinner "$CURRENT_STATUS"
-                LAST_EVENT_TYPE=""
+                echo "$token" > "$STATUS_FILE"
                 continue
             fi
 
-            # First real data token wipes the spinner line
+            if [[ "$LAST_EVENT_TYPE" != "message" ]]; then
+                continue
+            fi
+
+            # Immediately lock the parser if we detect the start of the appended Usage JSON
+            if [[ "$token" =~ ^[[:space:]]*\{[[:space:]]*$ ]] || [[ "$token" =~ \"prompt_tokens\" ]]; then
+                IGNORE_DATA_BLOCK=true
+            fi
+
+            if [ "$IGNORE_DATA_BLOCK" = true ]; then
+                continue
+            fi
+
             if [ "$HAS_STARTED_RESPONSE" = false ]; then
-                printf "\r\033[K"
+                echo "STOP_SPINNER" > "$STATUS_FILE"
+                wait $SPINNER_PID 2>/dev/null
+                printf "\r\033[2K" 
                 HAS_STARTED_RESPONSE=true
             fi
 
             printf "%s" "$token"
-            LAST_EVENT_TYPE=""
         fi
     done
+
+    if [ "$HAS_STARTED_RESPONSE" = false ]; then
+        echo "STOP_SPINNER" > "$STATUS_FILE"
+        wait $SPINNER_PID 2>/dev/null
+        printf "\r\033[2K"
+    fi
 
     TRACE_ID=$(grep -i "X-Trace-Id:" "$HEADER_FILE" | awk '{print $2}' | tr -d '\r\n')
     if [ ! -z "$TRACE_ID" ]; then
         echo -e "\n\n${DIM}Trace ID: $TRACE_ID${NC}"
     fi
-    rm -f "$HEADER_FILE"
+    
+    rm -f "$HEADER_FILE" "$STATUS_FILE" "$TMP_FILE" 2>/dev/null
 else
-    # Standard blocking pathway remains pristine
-    TMP_FILE=$(mktemp)
-    HEADER_FILE=$(mktemp)
-
+    # Standard blocking pathway
     curl -s -D "$HEADER_FILE" -X POST "$ENDPOINT" \
       -H "Content-Type: application/json" \
       -H "X-Pisces-Session-ID: $SESSION_ID" \
@@ -131,11 +183,12 @@ else
       -d "$JSON_PAYLOAD" > "$TMP_FILE" &
 
     CURL_PID=$!
+    SPIN_INDEX=0
     while kill -0 "$CURL_PID" 2>/dev/null; do
         print_spinner "Dr. Crane is listening"
         sleep 0.1
     done
-    printf "\r\033[K"
+    printf "\r\033[2K"
 
     ANSWER=$(jq -r '.response // .answer // "Error: Could not parse response."' "$TMP_FILE")
     echo -e "$ANSWER\n"
@@ -144,5 +197,5 @@ else
     if [ ! -z "$TRACE_ID" ]; then
         echo -e "${DIM}Trace ID: $TRACE_ID${NC}"
     fi
-    rm -f "$TMP_FILE" "$HEADER_FILE"
+    rm -f "$TMP_FILE" "$HEADER_FILE" "$STATUS_FILE" 2>/dev/null
 fi
