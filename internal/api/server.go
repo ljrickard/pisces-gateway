@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"pisces-gateway/internal/cache"
 	"pisces-gateway/internal/pipeline"
+	"pisces-gateway/internal/pregel"
 	"pisces-gateway/internal/proxy"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -11,8 +12,9 @@ import (
 
 // Server holds all the cross-cutting dependencies your handlers need
 type Server struct {
-	PipelineV1 *pipeline.Pipeline
-	// PipelineV2 *engine.Graph[AgentState]  <-- We will add this soon!
+	PipelineV1    *pipeline.Pipeline
+	GraphV2       *pregel.Graph[pregel.AgentState]
+	NodesV2       *pregel.GatewayNodes
 	FrasierClient *proxy.FrasierClient
 	QueryCache    *cache.QueryCache
 }

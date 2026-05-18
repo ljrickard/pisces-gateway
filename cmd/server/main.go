@@ -21,6 +21,7 @@ import (
 	"pisces-gateway/internal/gemini"
 	"pisces-gateway/internal/intent"
 	"pisces-gateway/internal/pipeline"
+	"pisces-gateway/internal/pregel"
 	"pisces-gateway/internal/proxy"
 	"pisces-gateway/internal/rewrite"
 
@@ -117,10 +118,31 @@ func main() {
 	}
 	slog.Info("✅ Downstream Frasier Bot link verified and active.")
 
+	rewriter := &rewrite.Rewriter{LLM: geminiClient}
+	classifier := &intent.Classifier{LLM: geminiClient}
+
+	// 1. Instantiate the V2 Nodes with injected dependencies
+	nodesV2 := &pregel.GatewayNodes{
+		LLM:        geminiClient,
+		QueryCache: queryCache,
+		FrasierBot: frasierClient,
+		Rewriter:   rewriter,
+		Classifier: classifier,
+	}
+
+	// 2. Compile the Graph ONCE at startup
+	compiledGraph := pregel.NewGraph[pregel.AgentState]()
+	compiledGraph.AddNode("rewrite_node", nodesV2.RewriteNode)
+	compiledGraph.AddNode("cache_node", nodesV2.SemanticCacheNode)
+	compiledGraph.AddNode("router_node", nodesV2.RouterNode)
+	compiledGraph.AddNode("call_bot_node", nodesV2.CallBotNode)
+
+	compiledGraph.SetEntryPoint("rewrite_node")
+
 	apiServer := api.Server{
 		PipelineV1: &pipeline.Pipeline{
-			Rewriter:     &rewrite.Rewriter{LLM: geminiClient},
-			Intent:       &intent.Classifier{LLM: geminiClient},
+			Rewriter:     rewriter,
+			Intent:       classifier,
 			Embedder:     geminiClient,
 			Sessionstore: sessionStore,
 			Querycache:   queryCache,
@@ -128,6 +150,8 @@ func main() {
 		},
 		FrasierClient: frasierClient,
 		QueryCache:    queryCache,
+		NodesV2:       nodesV2,
+		GraphV2:       compiledGraph,
 	}
 
 	mux := http.NewServeMux()

@@ -6,7 +6,6 @@ type ChatRequest struct {
 	Stream  bool           `json:"stream,omitempty"`
 }
 
-// --- OpenAI Spec Structs ---
 type OpenAIMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
