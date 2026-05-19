@@ -43,7 +43,13 @@ func (s *Server) HandleChatV1(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		flusher, _ := w.(http.Flusher)
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			slog.Error("❌ [Handlers V1 Stream] Streaming unsupported by response socket writer", "trace_id", traceID)
+			http.Error(w, "Streaming Unsupported", http.StatusInternalServerError)
+			return
+		}
 
 		sendGatewayStatus := func(msg string) {
 			fmt.Fprintf(w, "event: status\ndata: %s\n\n", msg)
