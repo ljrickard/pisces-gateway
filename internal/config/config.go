@@ -8,6 +8,13 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
+// RAGConfig defines the strict parameters allowed for a bot request
+type RAGConfig struct {
+	SearchLimit         int     `json:"search_limit,omitempty"`
+	SimilarityThreshold float32 `json:"similarity_threshold,omitempty"`
+	Temperature         float32 `json:"temperature,omitempty"`
+}
+
 type FeatureState struct {
 	SkipCache           bool
 	NoSession           bool

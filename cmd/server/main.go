@@ -136,6 +136,7 @@ func main() {
 	compiledGraph.AddNode("cache_node", nodesV2.SemanticCacheNode)
 	compiledGraph.AddNode("router_node", nodesV2.RouterNode)
 	compiledGraph.AddNode("call_bot_node", nodesV2.CallBotNode)
+	compiledGraph.AddNode("generate_node", nodesV2.GenerateNode)
 
 	compiledGraph.SetEntryPoint("rewrite_node")
 

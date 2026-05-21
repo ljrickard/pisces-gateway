@@ -7,6 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"time"
+
 	"pisces-gateway/internal/config"
 	"pisces-gateway/internal/pregel"
 	"pisces-gateway/tracing"
@@ -25,11 +28,22 @@ func (s *Server) HandleChatV2(w http.ResponseWriter, r *http.Request) {
 
 	metadata, _ := config.ParseRequestMetadata(r)
 
+	var chatHistory []string
+	if !metadata.Flags.NoSession && metadata.SessionID != "" {
+		history, err := s.PipelineV1.Sessionstore.GetSession(ctx, metadata.SessionID, metadata.Flags.ContextHistoryLimit)
+		if err != nil {
+			slog.Warn("Failed to fetch session history from Redis", "error", err)
+		} else {
+			chatHistory = history
+		}
+	}
+
 	state := &pregel.AgentState{
 		Query:     reqBody.Message,
+		SessionID: metadata.SessionID,
 		IsStream:  reqBody.Stream,
-		History:   []string{"User: Who is Niles?", "Bot: He is Frasier's brother."},
-		Config:    metadata.Flags,
+		History:   chatHistory,
+		Flags:     metadata.Flags,
 		LoopCount: 0,
 	}
 
@@ -41,7 +55,6 @@ func (s *Server) HandleChatV2(w http.ResponseWriter, r *http.Request) {
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			slog.Error("❌ [Handlers V2 STREAM INIT] Streaming unsupported by response socket writer", "trace_id", traceID)
 			http.Error(w, "Streaming Unsupported", http.StatusInternalServerError)
 			return
 		}
@@ -61,19 +74,11 @@ func (s *Server) HandleChatV2(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("⏹️ [V2 Engine] Graph execution finished", "trace_id", traceID, "loops", state.LoopCount)
 
-	// 4. THE STREAMING PATH 🌊 (Final Answer Tokens)
+	// 4. THE DOWNSTREAM STREAMING PATH 🌊 (Frasier Bot)
 	if state.StreamBody != nil {
 		defer state.StreamBody.Close()
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			slog.Error("❌ [Handlers V1 STREAMING PATH] Streaming unsupported by response socket writer", "trace_id", traceID)
-			http.Error(w, "Streaming Unsupported", http.StatusInternalServerError)
-			return
-		}
+		flusher, _ := w.(http.Flusher)
 
-		slog.Info("🌊 [Gateway] Pumping SSE stream to client", "trace_id", traceID)
-
-		// 🐛 THE FIX: Raw Byte Reader, EXACTLY like V1!
 		reader := bufio.NewReader(state.StreamBody)
 		for {
 			line, err := reader.ReadString('\n')
@@ -85,12 +90,37 @@ func (s *Server) HandleChatV2(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			fmt.Fprint(w, line)
-			flusher.Flush() // Flush immediately to avoid network queue lag
+			flusher.Flush()
 		}
 		return
 	}
 
-	// 5. THE BLOCKING PATH 🧱
+	// 5. THE FALLBACK PATH 🧱 (Generic LLM or Semantic Cache Hits)
+	if state.IsStream {
+		flusher, _ := w.(http.Flusher)
+		slog.Info("🌊 [Gateway] Pumping synthetic SSE stream for local graph result", "trace_id", traceID)
+
+		// To satisfy the bash script's spinner, we chunk the text block into SSE events
+		// This creates a fast, fake "typing" effect!
+		words := strings.Split(state.FinalAnswer, " ")
+		for i, word := range words {
+			prefix := ""
+			if i > 0 {
+				prefix = " "
+			}
+			// Clean newlines to prevent SSE framing corruption
+			safeWord := strings.ReplaceAll(prefix+word, "\n", " ")
+			fmt.Fprintf(w, "data: %s\n\n", safeWord)
+			flusher.Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	// 6. THE BLOCKING PATH (Standard JSON)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"response": state.FinalAnswer,
