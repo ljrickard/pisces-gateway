@@ -122,22 +122,50 @@ func main() {
 	classifier := &intent.Classifier{LLM: geminiClient}
 
 	// 1. Instantiate the V2 Nodes with injected dependencies
+	// In main.go during instantiation
+
 	nodesV2 := &pregel.GatewayNodes{
 		LLM:        geminiClient,
 		QueryCache: queryCache,
 		FrasierBot: frasierClient,
 		Rewriter:   rewriter,
 		Classifier: classifier,
+		Workers: map[string]pregel.DomainWorker{
+			"frasier": func(ctx context.Context, query string, cfg map[string]any, sessionID string) (string, error) {
+				payload := map[string]any{"query": query, "session_id": sessionID}
+				if len(cfg) > 0 {
+					payload["config"] = cfg
+				}
+				res, err := frasierClient.ForwardChat(ctx, payload)
+				if err != nil {
+					return "", err
+				}
+				if ans, ok := res["response"].(string); ok {
+					return ans, nil
+				}
+				return "Error parsing Frasier response", nil
+			},
+
+			"generic": func(ctx context.Context, query string, _ map[string]any, _ string) (string, error) {
+				prompt := pregel.GatewayGenericPrompt + query
+				return geminiClient.GenerateText(ctx, prompt, 0.0)
+			},
+		},
 	}
 
 	// 2. Compile the Graph ONCE at startup
 	compiledGraph := pregel.NewGraph[pregel.AgentState]()
+
+	// Phase 1: Context & Cache
 	compiledGraph.AddNode("rewrite_node", nodesV2.RewriteNode)
 	compiledGraph.AddNode("cache_node", nodesV2.SemanticCacheNode)
-	compiledGraph.AddNode("router_node", nodesV2.RouterNode)
-	compiledGraph.AddNode("call_bot_node", nodesV2.CallBotNode)
-	compiledGraph.AddNode("generate_node", nodesV2.GenerateNode)
 
+	// Phase 2: Fan-Out / Fan-In
+	compiledGraph.AddNode("planner_node", nodesV2.PlannerNode)
+	compiledGraph.AddNode("execution_node", nodesV2.ExecutionNode) // 🚀 Missing link added!
+	compiledGraph.AddNode("synthesizer_node", nodesV2.SynthesizerNode)
+
+	// Start here
 	compiledGraph.SetEntryPoint("rewrite_node")
 
 	apiServer := api.Server{

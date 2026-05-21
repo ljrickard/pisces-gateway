@@ -10,6 +10,12 @@ type MultimodalPart struct {
 	Data     []byte
 }
 
+type SubTask struct {
+	Query  string
+	Domain string // "frasier" or "generic"
+	Answer string
+}
+
 type AgentState struct {
 	Query        string
 	SessionID    string
@@ -21,6 +27,7 @@ type AgentState struct {
 	Attachments  []MultimodalPart
 	Domain       string
 	PendingTools []string
+	Tasks        []SubTask
 	FinalAnswer  string
 	StreamBody   io.ReadCloser
 	LoopCount    int
