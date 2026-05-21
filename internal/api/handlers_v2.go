@@ -44,6 +44,7 @@ func (s *Server) HandleChatV2(w http.ResponseWriter, r *http.Request) {
 		IsStream:  reqBody.Stream,
 		History:   chatHistory,
 		Flags:     metadata.Flags,
+		ReqConfig: reqBody.Config,
 		LoopCount: 0,
 	}
 

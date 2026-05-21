@@ -119,6 +119,11 @@ func (p *Pipeline) Execute(ctx context.Context, rawQuery string, history []strin
 			"request_id": requestID,
 		}
 
+		if len(botConfigs) > 0 {
+			payload["config"] = botConfigs
+			slog.Info("📦 [Payload] Attached specific bot config", "request_id", requestID, "domain", domain, "trace_id", traceID)
+		}
+
 		if specificConfig, exists := botConfigs[domain]; exists {
 			payload["config"] = specificConfig
 			slog.Info("📦 [Payload] Attached specific bot config", "request_id", requestID, "domain", domain, "trace_id", traceID)

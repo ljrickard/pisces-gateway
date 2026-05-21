@@ -85,8 +85,11 @@ func (n *GatewayNodes) CallBotNode(ctx context.Context, state *AgentState) (stri
 	payload := map[string]any{
 		"query":      state.Query,
 		"stream":     state.IsStream,
-		"config":     state.RAGConfig,
 		"session_id": state.SessionID,
+	}
+
+	if len(state.ReqConfig) > 0 {
+		payload["config"] = state.ReqConfig
 	}
 
 	// 🌊 STREAMING PATH

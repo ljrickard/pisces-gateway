@@ -15,7 +15,7 @@ type AgentState struct {
 	SessionID    string
 	History      []string
 	Flags        config.FeatureState
-	RAGConfig    config.RAGConfig `json:"config,omitempty"`
+	ReqConfig    map[string]any
 	IsStream     bool
 	StatusStream func(string)
 	Attachments  []MultimodalPart

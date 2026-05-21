@@ -79,7 +79,19 @@ echo -e "${DIM}Session ID (V2): $SESSION_ID${NC}"
 echo -e "${CYAN}🎙️  User:${NC} $CLEAN_MESSAGE"
 echo ""
 
-JSON_PAYLOAD=$(jq -n --arg msg "$CLEAN_MESSAGE" --argjson stream "$STREAM_MODE" '{message: $msg, stream: $stream}')
+# 🚀 THE FIX: Inject the downstream config overrides here to force a broader search
+JSON_PAYLOAD=$(jq -n \
+  --arg msg "$CLEAN_MESSAGE" \
+  --argjson stream "$STREAM_MODE" \
+  '{
+    message: $msg, 
+    stream: $stream,
+    config: {
+      "use_episode_limit": false,
+      "use_query_classification": false,
+      "final_k": 30
+    }
+  }')
 
 echo -e "${MAGENTA}🎧 Frasier (V2 Engine):${NC}"
 
