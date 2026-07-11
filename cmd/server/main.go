@@ -157,12 +157,12 @@ func main() {
 	compiledGraph := pregel.NewGraph[pregel.AgentState]()
 
 	// Phase 1: Context & Cache
-	compiledGraph.AddNode("rewrite_node", nodesV2.RewriteNode)
-	compiledGraph.AddNode("cache_node", nodesV2.SemanticCacheNode)
+	compiledGraph.AddNode("rewrite_node", nodesV2.ResolveContext)
+	compiledGraph.AddNode("cache_node", nodesV2.CheckCache)
 
 	// Phase 2: Fan-Out / Fan-In
-	compiledGraph.AddNode("planner_node", nodesV2.PlannerNode)
-	compiledGraph.AddNode("execution_node", nodesV2.ExecutionNode) // 🚀 Missing link added!
+	compiledGraph.AddNode("planner_node", nodesV2.Plan)
+	compiledGraph.AddNode("execution_node", nodesV2.ExecuteWorkers)
 	compiledGraph.AddNode("synthesizer_node", nodesV2.SynthesizerNode)
 
 	// Start here
