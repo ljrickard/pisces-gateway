@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
@@ -24,6 +26,7 @@ import (
 	"pisces-gateway/internal/pregel"
 	"pisces-gateway/internal/proxy"
 	"pisces-gateway/internal/rewrite"
+	"pisces-gateway/internal/workers"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -122,8 +125,6 @@ func main() {
 	classifier := &intent.Classifier{LLM: geminiClient}
 
 	// 1. Instantiate the V2 Nodes with injected dependencies
-	// In main.go during instantiation
-
 	nodesV2 := &pregel.GatewayNodes{
 		LLM:        geminiClient,
 		QueryCache: queryCache,
@@ -131,25 +132,8 @@ func main() {
 		Rewriter:   rewriter,
 		Classifier: classifier,
 		Workers: map[string]pregel.DomainWorker{
-			"frasier": func(ctx context.Context, query string, cfg map[string]any, sessionID string) (string, error) {
-				payload := map[string]any{"query": query, "session_id": sessionID}
-				if len(cfg) > 0 {
-					payload["config"] = cfg
-				}
-				res, err := frasierClient.ForwardChat(ctx, payload)
-				if err != nil {
-					return "", err
-				}
-				if ans, ok := res["response"].(string); ok {
-					return ans, nil
-				}
-				return "Error parsing Frasier response", nil
-			},
-
-			"generic": func(ctx context.Context, query string, _ map[string]any, _ string) (string, error) {
-				prompt := pregel.GatewayGenericPrompt + query
-				return geminiClient.GenerateText(ctx, prompt, 0.0)
-			},
+			"frasier": workers.NewFrasierWorker(frasierClient),
+			"generic": workers.NewGenericWorker(geminiClient),
 		},
 	}
 
@@ -186,8 +170,52 @@ func main() {
 	mux := http.NewServeMux()
 	apiServer.Mount(mux)
 
-	slog.Info("🚀 Pisces Gateway listening on :8080")
-	_ = http.ListenAndServe(":8080", mux)
+	// 🚀 GRACEFUL SHUTDOWN ARCHITECTURE
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	go func() {
+		slog.Info("🚀 Pisces Gateway listening on :8080")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("❌ HTTP server crashed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Listen for OS shutdown signals from Kubernetes
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("🛑 Shutdown signal received. Terminating HTTP traffic...")
+
+	// 1. Stop accepting new requests and wait for active HTTP traffic to finish
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("HTTP server forced to shutdown", "error", err)
+	}
+
+	// 2. 🛡️ DRAIN THE POOL: Wait for any mid-flight Redis cache writes to finish!
+	slog.Info("Waiting for background cache writes to drain...")
+
+	bgDone := make(chan struct{})
+	go func() {
+		apiServer.BgWG.Wait()
+		close(bgDone)
+	}()
+
+	select {
+	case <-bgDone:
+		slog.Info("✅ All background goroutines drained cleanly.")
+	case <-time.After(5 * time.Second):
+		slog.Warn("⚠️ Timeout reached: force-closing remaining background tasks.")
+	}
+
+	slog.Info("🏁 Pisces Gateway shutdown complete.")
 }
 
 func getSecret(ctx context.Context, projectID, secretName string) (string, error) {

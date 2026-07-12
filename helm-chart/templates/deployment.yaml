@@ -3,12 +3,12 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}
 spec:
-  replicas: 2 # <-- High Availability enabled
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0          # Do not try to create extra pods above 2
-      maxUnavailable: 1    # Shut down 1 pod first to free up 0.5 vCPU / 2Gi RAM
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -18,7 +18,8 @@ spec:
         app: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Values.serviceAccountName }}
-      # --- THE SPOT INSTANCE HA CHEAT CODE ---
+      nodeSelector:
+        cloud.google.com/gke-nodepool: standard-cpu-pool
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

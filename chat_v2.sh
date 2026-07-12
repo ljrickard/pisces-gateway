@@ -79,7 +79,6 @@ echo -e "${DIM}Session ID (V2): $SESSION_ID${NC}"
 echo -e "${CYAN}🎙️  User:${NC} $CLEAN_MESSAGE"
 echo ""
 
-# 🚀 THE FIX: Inject the downstream config overrides here to force a broader search
 JSON_PAYLOAD=$(jq -n \
   --arg msg "$CLEAN_MESSAGE" \
   --argjson stream "$STREAM_MODE" \
@@ -89,7 +88,7 @@ JSON_PAYLOAD=$(jq -n \
     config: {
       "use_episode_limit": false,
       "use_query_classification": false,
-      "final_k": 30
+      "final_k": 30,
     }
   }')
 
@@ -168,7 +167,8 @@ if [ "$STREAM_MODE" = true ]; then
                 HAS_STARTED_RESPONSE=true
             fi
 
-            printf "%s" "$token"
+            token="${token//###/$'\n\n'###}"
+            printf "%b" "$token"
         fi
     done
 
@@ -202,7 +202,13 @@ else
     printf "\r\033[2K"
 
     ANSWER=$(jq -r '.response // .answer // "Error: Could not parse response."' "$TMP_FILE")
-    echo -e "$ANSWER\n"
+    
+    # 💅 IDE-Grade Terminal Rendering: If glow is installed, render Markdown beautifully; otherwise fall back to standard echo
+    if command -v glow &> /dev/null; then
+        echo -e "$ANSWER" | glow
+    else
+        echo -e "$ANSWER\n"
+    fi
 
     TRACE_ID=$(grep -i "X-Trace-Id:" "$HEADER_FILE" | awk '{print $2}' | tr -d '\r\n')
     if [ ! -z "$TRACE_ID" ]; then

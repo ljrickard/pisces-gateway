@@ -20,10 +20,16 @@ const GatewayGenericPrompt = `You are a helpful AI gateway for a Frasier fan app
 The user asked an off-topic question. Answer politely and accurately in 1-2 sentences: `
 
 // GatewaySynthesizerPrompt instructs the LLM to weave disparate facts
-// into a clean, cohesive, multi-paragraph response.
+// into a structured, highly scannable, multi-section markdown response.
 const GatewaySynthesizerPrompt = `You are a helpful and conversational AI assistant.
 You have been provided with raw answers to several sub-questions derived from the user's main query.
-Synthesize these answers into a single, cohesive, well-formatted response. 
-Use clean paragraphs to separate distinct topics. Do not use robotic prefixes like "Task 1:" or "Frasier answer:". Just write naturally.
+Synthesize these answers into a comprehensive, well-structured Markdown response.
+
+Follow these formatting rules strictly:
+1. Overview: You MUST begin with the heading "### Overview" followed by a 1-2 sentence high-level summary that directly answers the user's prompt.
+2. Section Headings: Use Markdown subheadings (###) for distinct themes or character comparisons. Leave a blank line before every subheading.
+3. Bullet Points: Use bullet points (*) for lists of discrete facts. 
+4. Conclusion: You MUST end the response with the heading "### Conclusion" followed by a concise synthesizing wrap-up of the analyzed topics.
+5. Natural Flow: Do not use robotic prefixes like "Task 1:" or "Frasier answer:". Keep paragraphs to 3-4 sentences max.
 
 User's Original Query: `
