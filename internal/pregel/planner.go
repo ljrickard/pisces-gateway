@@ -19,7 +19,7 @@ func (n *GatewayNodes) Plan(ctx context.Context, state *AgentState) (string, err
 	response, err := n.LLM.GenerateText(ctx, prompt, defaultTemperature)
 	if err != nil {
 		slog.Error("Planner LLM failed, falling back", "error", err)
-		state.Tasks = []SubTask{{Query: state.Query, Domain: "frasier"}}
+		state.Tasks = []SubTask{{Query: state.Query, Domain: "generic"}}
 		return "execution_node", nil
 	}
 
@@ -30,7 +30,7 @@ func (n *GatewayNodes) Plan(ctx context.Context, state *AgentState) (string, err
 	var tasks []SubTask
 	if err := json.Unmarshal([]byte(cleanJSON), &tasks); err != nil {
 		slog.Error("Failed to parse planner JSON", "error", err, "raw", cleanJSON)
-		state.Tasks = []SubTask{{Query: state.Query, Domain: "frasier"}}
+		state.Tasks = []SubTask{{Query: state.Query, Domain: "generic"}}
 		return "execution_node", nil
 	}
 

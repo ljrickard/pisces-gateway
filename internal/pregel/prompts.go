@@ -1,7 +1,14 @@
 package pregel
 
-// GatewayPlannerPrompt instructs the LLM to decompose a multi-part query
-// into distinct, domain-specific tasks.
+/*
+TODO: DECOUPLE DOMAINS & BUILD PROMPTS DYNAMICALLY
+
+Problem:
+Target domains ("frasier", "generic") are hardcoded into the planner prompt below.
+While our workers are cleanly abstracted in a Go map (map[string]DomainWorker), this static string
+creates tight coupling between the LLM routing instructions and backend service implementations.
+*/
+
 const GatewayPlannerPrompt = `You are a query planner for an API Gateway. You have two target domains:
 1. "frasier": For ANY questions about the TV show Frasier, its characters, plots, or transcripts.
 2. "generic": For anything else (math, sports, general knowledge).
