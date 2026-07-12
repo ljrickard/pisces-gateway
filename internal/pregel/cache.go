@@ -25,13 +25,12 @@ func (n *GatewayNodes) CheckCache(ctx context.Context, state *AgentState) (strin
 		return "planner_node", nil // Fail-open: if embedding fails, just route to the bot
 	}
 
-	// 2. Check Redis for a Semantic Match
-	// Assuming your cache returns the cached answer and a boolean/error
 	cachedAnswer, isHit := n.QueryCache.GetCache(ctx, vector, state.Flags.SimilarityThreshold)
 
 	if isHit && cachedAnswer != "" {
 		slog.Info("⚡ Semantic Cache Hit! Short-circuiting graph.")
 		state.FinalAnswer = cachedAnswer
+		state.IsCacheHit = true
 		return "END", nil
 	}
 

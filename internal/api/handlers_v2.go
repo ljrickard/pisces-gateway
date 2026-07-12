@@ -75,6 +75,8 @@ func (s *Server) HandleChatV2(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("⏹️ [V2 Engine] Graph execution finished", "trace_id", traceID, "loops", state.LoopCount)
 
+	s.saveToCacheAsync(ctx, state)
+
 	// 4. THE DOWNSTREAM STREAMING PATH 🌊 (Frasier Bot)
 	if state.StreamBody != nil {
 		defer state.StreamBody.Close()

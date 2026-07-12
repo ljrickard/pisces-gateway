@@ -31,4 +31,6 @@ type AgentState struct {
 	FinalAnswer  string
 	StreamBody   io.ReadCloser
 	LoopCount    int
+	IsCacheHit   bool
+	HasError     bool
 }

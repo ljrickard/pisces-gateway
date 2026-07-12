@@ -14,12 +14,11 @@ func (n *GatewayNodes) ResolveContext(ctx context.Context, state *AgentState) (s
 
 	if state.Flags.NoSession || len(state.History) == 0 {
 		slog.Debug("Skipping rewrite: NoSession flag active or history is empty")
-		return "planner_node", nil
+		return "cache_node", nil
 	}
 
-	// 2. Delegate to the existing domain package!
 	slog.Info("Delegating query to rewrite package...")
 	state.Query = n.Rewriter.Resolve(ctx, state.Query, state.History)
 
-	return "planner_node", nil
+	return "cache_node", nil
 }

@@ -119,7 +119,7 @@ if [ "$STREAM_MODE" = true ]; then
       -H "Content-Type: application/json" \
       -H "X-Pisces-Session-ID: $SESSION_ID" \
       -H "X-Pisces-Flag-NoSession: true" \
-      -H "X-Pisces-Flag-SkipCache: true" \
+      -H "X-Pisces-Flag-SkipCache: false" \
       -d "$JSON_PAYLOAD" | while IFS= read -r raw_line; do
         
         line="${raw_line//$'\r'/}"
@@ -190,7 +190,7 @@ else
       -H "Content-Type: application/json" \
       -H "X-Pisces-Session-ID: $SESSION_ID" \
       -H "X-Pisces-Flag-NoSession: true" \
-      -H "X-Pisces-Flag-SkipCache: true" \
+      -H "X-Pisces-Flag-SkipCache: false" \
       -d "$JSON_PAYLOAD" > "$TMP_FILE" &
 
     CURL_PID=$!

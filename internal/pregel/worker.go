@@ -38,6 +38,9 @@ func (n *GatewayNodes) ExecuteWorkers(ctx context.Context, state *AgentState) (s
 			if err != nil {
 				slog.Error("❌ [Worker Failed]", "domain", task.Domain, "error", err)
 				answer = "I'm sorry, I couldn't reach the " + task.Domain + " services right now."
+				mu.Lock()
+				state.HasError = true
+				mu.Unlock()
 			} else {
 				slog.Info("✅ [Worker Completed]", "domain", task.Domain, "answer_length", len(answer))
 			}
